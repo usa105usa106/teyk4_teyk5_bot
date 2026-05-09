@@ -29,6 +29,7 @@ class Signal:
     elliott_structure: str = "OFF"
     elliott_pattern: str = ""
     elliott_pivots: list | None = None
+    elliott_phase: str = ""
 
     def to_dict(self):
         return self.__dict__.copy()
@@ -206,19 +207,25 @@ def _abc_quality(points: list[tuple[int, str, float]], min_move: float) -> tuple
     return valid, possible
 
 def elliott_analysis(df: pd.DataFrame) -> dict:
-    """Strict but lightweight Elliott filter.
+    """Classical Elliott 5-3 filter.
 
-    The bot does not force wave counts. It returns:
-    - VALID when core Elliott rules pass;
-    - POSSIBLE when the shape is close but needs confirmation;
-    - INVALID/NEUTRAL when wave count should not be drawn or used.
+    IMPORTANT TRADING BIAS RULES USED BY THE BOT:
+    - A completed 5-wave impulse UP expects A-B-C DOWN, so bias = SHORT/correction.
+    - A completed 5-wave impulse DOWN expects A-B-C UP, so bias = LONG/correction.
+    - A completed A-B-C DOWN expects a new impulse UP, so bias = LONG.
+    - A completed A-B-C UP expects a new impulse DOWN, so bias = SHORT.
+
+    The function never forces a wave count. If the sequence is not clean, it
+    returns INVALID and the chart will not draw numbered/lettered waves.
     """
     pivots = _find_pivots(df, lookback=5, tail=140)
     tail_df = df.tail(140).reset_index(drop=True)
     tail_range = float(tail_df["high"].max() - tail_df["low"].min()) if not tail_df.empty else 0.0
     close_med = float(tail_df["close"].median()) if not tail_df.empty else 0.0
-    atr_med = float(atr(tail_df).dropna().tail(40).median()) if not atr(tail_df).dropna().empty else 0.0
-    min_wave_move = max(atr_med * 1.20, tail_range * 0.085, abs(close_med) * 0.0045)
+    atr_vals = atr(tail_df).dropna() if not tail_df.empty else pd.Series(dtype=float)
+    atr_med = float(atr_vals.tail(40).median()) if not atr_vals.empty else 0.0
+    min_wave_move = max(atr_med * 1.35, tail_range * 0.10, abs(close_med) * 0.006)
+
     base = {
         "direction": "NEUTRAL",
         "wave": "unclear",
@@ -228,106 +235,129 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
         "structure": "INVALID",
         "pattern": "none",
         "plot_points": [],
+        "phase": "unclear",
+        "tail_window": 140,
     }
     if len(pivots) < 3:
         return base
 
-    # Prefer a full 5-wave impulse: origin + 5 endpoints. We plot only endpoints 1-5.
-    for pts in (pivots[-6:], pivots[-7:-1] if len(pivots) >= 7 else []):
-        if len(pts) != 6 or not _swing_quality(pts, min_wave_move, min_sep=5):
+    # 1) Completed 5-wave impulse. We validate origin + five endpoints,
+    #    but draw only endpoints 1-2-3-4-5. Bias is OPPOSITE direction
+    #    because after wave 5 classical Elliott expects A-B-C correction.
+    candidates = []
+    if len(pivots) >= 6:
+        candidates.append(pivots[-6:])
+    if len(pivots) >= 7:
+        candidates.append(pivots[-7:-1])
+    for pts in candidates:
+        if len(pts) != 6 or not _swing_quality(pts, min_wave_move, min_sep=6):
             continue
         if _valid_bullish_impulse(pts):
             return {
-                "direction": "LONG",
-                "wave": "5-wave impulse",
-                "score": 24,
-                "reason": "валидная 5-волновая импульсная структура вверх",
+                "direction": "SHORT",
+                "wave": "5-wave impulse up completed → expecting A-B-C down",
+                "score": 20,
+                "reason": "5 волн вверх завершены, по Elliott ожидается коррекция A-B-C вниз",
                 "pivots": pivots,
                 "structure": "VALID",
-                "pattern": "impulse5",
+                "pattern": "impulse5_up_completed",
                 "plot_points": pts[1:],
+                "phase": "wave5_completed_expect_abc_down",
+                "tail_window": 140,
             }
         if _valid_bearish_impulse(pts):
             return {
-                "direction": "SHORT",
-                "wave": "5-wave impulse",
-                "score": 24,
-                "reason": "валидная 5-волновая импульсная структура вниз",
+                "direction": "LONG",
+                "wave": "5-wave impulse down completed → expecting A-B-C up",
+                "score": 20,
+                "reason": "5 волн вниз завершены, по Elliott ожидается коррекция A-B-C вверх",
                 "pivots": pivots,
                 "structure": "VALID",
-                "pattern": "impulse5",
+                "pattern": "impulse5_down_completed",
                 "plot_points": pts[1:],
+                "phase": "wave5_completed_expect_abc_up",
+                "tail_window": 140,
             }
+        # Possible impulses are not used as auto-trade confirmation. They may
+        # annotate only if they are clean enough, but with lower score.
         if _possible_bullish_impulse(pts):
             return {
-                "direction": "LONG",
-                "wave": "possible 5-wave impulse",
-                "score": 12,
-                "reason": "возможная 5-волновая структура вверх, нужна проверка продолжения",
+                "direction": "SHORT",
+                "wave": "possible 5-wave impulse up → possible A-B-C down",
+                "score": 8,
+                "reason": "возможные 5 волн вверх, но структура требует подтверждения",
                 "pivots": pivots,
                 "structure": "POSSIBLE",
-                "pattern": "impulse5",
+                "pattern": "impulse5_up_completed",
                 "plot_points": pts[1:],
+                "phase": "possible_wave5_expect_abc_down",
+                "tail_window": 140,
             }
         if _possible_bearish_impulse(pts):
             return {
-                "direction": "SHORT",
-                "wave": "possible 5-wave impulse",
-                "score": 12,
-                "reason": "возможная 5-волновая структура вниз, нужна проверка продолжения",
+                "direction": "LONG",
+                "wave": "possible 5-wave impulse down → possible A-B-C up",
+                "score": 8,
+                "reason": "возможные 5 волн вниз, но структура требует подтверждения",
                 "pivots": pivots,
                 "structure": "POSSIBLE",
-                "pattern": "impulse5",
+                "pattern": "impulse5_down_completed",
                 "plot_points": pts[1:],
+                "phase": "possible_wave5_expect_abc_up",
+                "tail_window": 140,
             }
 
-    # ABC correction: exactly 3 alternating endpoints. A-B-C is drawn only with 3 points
-    # and only when all three points are inside a recent visible area.
+    # 2) Completed A-B-C correction. A-B-C has exactly three endpoints.
+    #    After C, expected direction is a NEW impulse in the opposite direction
+    #    of the correction.
     last3 = pivots[-3:]
     types = "".join(p[1] for p in last3)
     prices = [p[2] for p in last3]
     close_now = float(df["close"].iloc[-1])
     atr_now = float(atr(df).iloc[-1]) if not atr(df).dropna().empty else 0.0
 
-    if types == "LHL" and _swing_quality(last3, min_wave_move, min_sep=5):
-        # Downward A-B-C correction inside broader bullish context:
-        # A = first low, B = retracement high, C = final low.
+    if types == "LHL" and _swing_quality(last3, min_wave_move, min_sep=6):
+        # A-B-C down: A low, B high, C low. After C -> expected LONG.
         a_low, b_high, c_low = prices
         valid_ratio, possible_ratio = _abc_quality(last3, min_wave_move)
-        c_near_or_below_a = c_low <= a_low + max(min_wave_move * 0.35, abs(a_low) * 0.0015)
-        bounced_from_c = close_now > c_low + max(atr_now * 0.25, abs(c_low) * 0.0018)
+        c_near_or_below_a = c_low <= a_low + max(min_wave_move * 0.25, abs(a_low) * 0.0012)
+        bounced_from_c = close_now > c_low + max(atr_now * 0.35, abs(c_low) * 0.0020)
         possible = bool(possible_ratio and c_near_or_below_a)
         valid = bool(valid_ratio and c_near_or_below_a and bounced_from_c)
         if possible:
             return {
                 "direction": "LONG",
-                "wave": "A-B-C correction",
-                "score": 18 if valid else 8,
-                "reason": "чистая 3-волновая коррекция A-B-C вниз, есть отскок от C" if valid else "возможная ABC-коррекция вниз, требуется подтверждение",
+                "wave": "A-B-C correction down completed → expecting new impulse up",
+                "score": 22 if valid else 8,
+                "reason": "ABC вниз завершена, ожидается новый импульс вверх" if valid else "возможная ABC вниз, нужно подтверждение отскока от C",
                 "pivots": pivots,
                 "structure": "VALID" if valid else "POSSIBLE",
-                "pattern": "abc",
+                "pattern": "abc_down_completed",
                 "plot_points": last3,
+                "phase": "abc_completed_expect_impulse_up",
+                "tail_window": 140,
             }
-    if types == "HLH" and _swing_quality(last3, min_wave_move, min_sep=5):
-        # Upward A-B-C correction inside broader bearish context:
-        # A = first high, B = retracement low, C = final high.
+
+    if types == "HLH" and _swing_quality(last3, min_wave_move, min_sep=6):
+        # A-B-C up: A high, B low, C high. After C -> expected SHORT.
         a_high, b_low, c_high = prices
         valid_ratio, possible_ratio = _abc_quality(last3, min_wave_move)
-        c_near_or_above_a = c_high >= a_high - max(min_wave_move * 0.35, abs(a_high) * 0.0015)
-        rejected_from_c = close_now < c_high - max(atr_now * 0.25, abs(c_high) * 0.0018)
+        c_near_or_above_a = c_high >= a_high - max(min_wave_move * 0.25, abs(a_high) * 0.0012)
+        rejected_from_c = close_now < c_high - max(atr_now * 0.35, abs(c_high) * 0.0020)
         possible = bool(possible_ratio and c_near_or_above_a)
         valid = bool(valid_ratio and c_near_or_above_a and rejected_from_c)
         if possible:
             return {
                 "direction": "SHORT",
-                "wave": "A-B-C correction",
-                "score": 18 if valid else 8,
-                "reason": "чистая 3-волновая коррекция A-B-C вверх, есть отбой от C" if valid else "возможная ABC-коррекция вверх, требуется подтверждение",
+                "wave": "A-B-C correction up completed → expecting new impulse down",
+                "score": 22 if valid else 8,
+                "reason": "ABC вверх завершена, ожидается новый импульс вниз" if valid else "возможная ABC вверх, нужен отбой от C",
                 "pivots": pivots,
                 "structure": "VALID" if valid else "POSSIBLE",
-                "pattern": "abc",
+                "pattern": "abc_up_completed",
                 "plot_points": last3,
+                "phase": "abc_completed_expect_impulse_down",
+                "tail_window": 140,
             }
 
     return base
@@ -474,4 +504,5 @@ def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp
         elliott_structure=str(ell.get("structure", "OFF")),
         elliott_pattern=str(ell.get("pattern", "")),
         elliott_pivots=ell.get("plot_points", []),
+        elliott_phase=str(ell.get("phase", "")),
     )

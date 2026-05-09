@@ -102,6 +102,15 @@ def _right_label(ax, x: float, y: float, text: str, fc: str, color: str = "white
 
 
 def _draw_elliott(ax, data: pd.DataFrame, signal: dict):
+    """Draw Elliott only from validated strategy output.
+
+    Rules:
+    - 5-wave impulse is labelled exactly 1-2-3-4-5, never with repeats.
+    - A-B-C correction is labelled exactly A-B-C.
+    - After completed 5 up/down the arrow points to expected A-B-C correction.
+    - After completed A-B-C the arrow points to expected new impulse.
+    - If points are not clean or not visible, do not force labels.
+    """
     if not signal.get("elliott_enabled"):
         return
 
@@ -109,6 +118,7 @@ def _draw_elliott(ax, data: pd.DataFrame, signal: dict):
     wave = str(signal.get("elliott_wave", ""))
     structure = str(signal.get("elliott_structure", "INVALID")).upper()
     pattern = str(signal.get("elliott_pattern", ""))
+    phase = str(signal.get("elliott_phase", ""))
     score = float(signal.get("elliott_score", 0) or 0)
     points = signal.get("elliott_pivots") or []
 
@@ -119,70 +129,77 @@ def _draw_elliott(ax, data: pd.DataFrame, signal: dict):
                 bbox=dict(boxstyle="round,pad=0.45", fc="#111827", ec="#ef4444", alpha=0.88), zorder=14)
         return
 
-    # Info box: visible but kept away from Entry Zone.
     box_ec = "#22c55e" if structure == "VALID" else "#facc15"
     ax.text(0.015, 0.94,
             f"🌊 Elliott ON\nBias: {direction}\nStructure: {structure}\nPattern: {wave}\nScore impact: +{score:.0f}",
             transform=ax.transAxes, ha="left", va="top", fontsize=9, color="#e5e7eb",
             bbox=dict(boxstyle="round,pad=0.45", fc="#111827", ec=box_ec, alpha=0.88), zorder=14)
 
+    # Strategy pivot x values are relative to a 140-candle tail. The plotted
+    # chart shows 90 candles, so subtract 50 to land on the visible window.
+    visible_pts = []
     if points:
-        # Points are produced by strategy on a longer tail window. The chart shows
-        # only the last 90 candles, so remap x-coordinates into the visible window.
         raw_pts = [(int(p[0]), str(p[1]), float(p[2])) for p in points]
-        max_x = max(x for x, _, _ in raw_pts)
-        offset = max(0, max_x - (len(data) - 1))
-        pts = [(x - offset, typ, y) for x, typ, y in raw_pts if 0 <= x - offset < len(data)]
+        offset = max(0, 140 - len(data))
+        visible_pts = [(x - offset, typ, y) for x, typ, y in raw_pts if 0 <= x - offset < len(data)]
 
-        if pattern == "impulse5" and len(pts) == 5:
-            xs = [p[0] for p in pts]
-            ys = [p[2] for p in pts]
+    # Draw a validated sequence only when all required points are visible and unique.
+    if pattern.startswith("impulse5") and len(visible_pts) == 5:
+        xs = [p[0] for p in visible_pts]
+        if len(set(xs)) == 5 and xs == sorted(xs):
+            ys = [p[2] for p in visible_pts]
+            # 5 up/down uses green/red to show impulse direction; possible is dashed.
+            impulse_color = "#22c55e" if "up" in pattern else "#ef4444"
             ls = "-" if structure == "VALID" else "--"
-            ax.plot(xs, ys, color="#3b82f6", linewidth=2.2, linestyle=ls, zorder=8)
-            for label, (x, typ, y) in zip(["1", "2", "3", "4", "5"], pts):
-                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.032 if typ == "H" else -0.042)
-                ax.text(x, y + off, label, color="#60a5fa", fontsize=12, fontweight="bold",
+            ax.plot(xs, ys, color=impulse_color, linewidth=2.4, linestyle=ls, zorder=8)
+            for label, (x, typ, y) in zip(["1", "2", "3", "4", "5"], visible_pts):
+                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.035 if typ == "H" else -0.045)
+                ax.text(x, y + off, label, color=impulse_color, fontsize=12, fontweight="bold",
                         ha="center", va="center", zorder=10,
-                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec="#3b82f6", alpha=0.90))
-        elif pattern == "abc" and len(pts) == 3:
-            xs = [p[0] for p in pts]
-            ys = [p[2] for p in pts]
+                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec=impulse_color, alpha=0.92))
+    elif pattern.startswith("abc") and len(visible_pts) == 3:
+        xs = [p[0] for p in visible_pts]
+        if len(set(xs)) == 3 and xs == sorted(xs):
+            ys = [p[2] for p in visible_pts]
             ls = "-" if structure == "VALID" else "--"
-            ax.plot(xs, ys, color="#facc15", linewidth=2.2, linestyle=ls, zorder=8)
-            for label, (x, typ, y) in zip(["A", "B", "C"], pts):
-                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.032 if typ == "H" else -0.042)
+            ax.plot(xs, ys, color="#facc15", linewidth=2.4, linestyle=ls, zorder=8)
+            for label, (x, typ, y) in zip(["A", "B", "C"], visible_pts):
+                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.035 if typ == "H" else -0.045)
                 ax.text(x, y + off, label, color="#facc15", fontsize=12, fontweight="bold",
                         ha="center", va="center", zorder=10,
-                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec="#facc15", alpha=0.90))
-        elif raw_pts:
-            ax.text(0.015, 0.79, "Elliott points outside visible range", transform=ax.transAxes,
-                    ha="left", va="top", fontsize=8.5, color="#facc15", zorder=14)
+                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec="#facc15", alpha=0.92))
 
-    # Strong projected Elliott direction arrow. It is drawn only when Elliott bias
-    # is valid/possible and always follows Elliott direction, not a conflicting main signal.
+    # Projected move. For completed 5-wave impulse this is the expected ABC
+    # correction. For completed ABC this is the expected new impulse.
     last_x = len(data) - 1
     last_close = float(data["close"].iloc[-1])
     tp = float(signal["take_profit"])
     stop = float(signal.get("stop", last_close))
     is_up = direction == "LONG"
-    start_x = last_x + 1.6
-    end_x = last_x + 11.5
+    start_x = last_x + 1.8
+    end_x = last_x + 10.5
     start_y = last_close
-    end_y = tp if is_up else stop
+    # Use TP as target when aligned with trade side; for post-5 correction this
+    # is still the signal's expected direction after Elliott filtering.
+    end_y = tp if is_up else tp
 
     ax.annotate("", xy=(end_x, end_y), xytext=(start_x, start_y),
-                arrowprops=dict(arrowstyle="-|>", mutation_scale=36, linewidth=9.0,
+                arrowprops=dict(arrowstyle="-|>", mutation_scale=34, linewidth=8.0,
                                 color="#1d4ed8", alpha=0.20, linestyle="--"),
                 zorder=8)
     ax.annotate("", xy=(end_x, end_y), xytext=(start_x, start_y),
-                arrowprops=dict(arrowstyle="-|>", mutation_scale=30, linewidth=4.2,
+                arrowprops=dict(arrowstyle="-|>", mutation_scale=28, linewidth=3.8,
                                 color="#3b82f6", alpha=0.98, linestyle="--"),
                 zorder=11)
-    label_y = start_y + (end_y - start_y) * 0.45
-    ax.text(start_x + 3.0, label_y, "ELLIOTT\nEXPECTED MOVE", ha="left", va="center",
-            fontsize=12, fontweight="bold", color="#60a5fa", zorder=12,
+    label_y = start_y + (end_y - start_y) * 0.55
+    label = "ELLIOTT\nEXPECTED MOVE"
+    if phase.startswith("wave5_completed") or phase.startswith("possible_wave5"):
+        label = "ELLIOTT\nEXPECTED A-B-C"
+    elif phase.startswith("abc_completed"):
+        label = "ELLIOTT\nNEW IMPULSE"
+    ax.text(start_x + 2.4, label_y, label, ha="left", va="center",
+            fontsize=11, fontweight="bold", color="#60a5fa", zorder=12,
             bbox=dict(boxstyle="round,pad=0.35", fc="#0b1220", ec="#1d4ed8", alpha=0.72))
-
 
 def _make_simple_signal_chart(df: pd.DataFrame, signal: dict) -> str:
     """Low-resource chart: close line + Entry/SL/TP levels, no candles/volume/Elliott detail."""
