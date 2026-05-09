@@ -107,6 +107,18 @@ async def maybe_execute_trade(user_id: int, signal: dict, settings: dict) -> dic
     if not settings.get("auto_trade"):
         return result
 
+    # Strict Elliott rule for auto-trading: if Elliott is enabled, the bot may
+    # auto-enter only HIGH-confidence signals where main direction agrees with a
+    # VALID Elliott structure. POSSIBLE Elliott is allowed for signal display, but
+    # not for automatic order placement.
+    if settings.get("elliott_enabled"):
+        ell_dir = str(signal.get("elliott_direction", "NEUTRAL")).upper()
+        ell_structure = str(signal.get("elliott_structure", "INVALID")).upper()
+        conf = str(signal.get("confidence_label", "LOW")).upper()
+        if ell_dir != str(signal.get("side", "")).upper() or ell_structure != "VALID" or conf != "HIGH":
+            result["status"] = "auto_blocked_elliott_strict_filter"
+            return result
+
     if settings.get("trade_mode") != "live":
         result["status"] = "paper_limit_placed"
         result["orders"].append({"type": "limit", "price": plan.entry_price, "side": signal["side"]})

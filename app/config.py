@@ -28,7 +28,7 @@ class Defaults:
     risk_pct: float = 0.5
     leverage: int = 2
     elliott_enabled: bool = False
-    premium_renderer: bool = True
+    premium_renderer: bool = False
 
     def __post_init__(self):
         if self.custom_symbols is None:

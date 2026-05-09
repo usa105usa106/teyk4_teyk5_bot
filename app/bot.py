@@ -4,7 +4,7 @@ import time
 from html import escape
 from dotenv import load_dotenv
 import psutil
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -32,6 +32,20 @@ def universe_label(settings: dict) -> str:
 def owner_allowed(user_id: int) -> bool:
     owner = os.getenv("OWNER_TELEGRAM_ID", "").strip()
     return not owner or str(user_id) == owner
+
+
+def persistent_menu() -> ReplyKeyboardMarkup:
+    """Bottom Telegram keyboard that stays available even if inline buttons disappear."""
+    return ReplyKeyboardMarkup(
+        [
+            ["⬆️ Меню", "🔎 Скан"],
+            ["📡 Ping", "❔ Help"],
+            ["💤 Sleep", "🚀 Wake"],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Нажми ⬆️ Меню, чтобы вернуть кнопки",
+    )
 
 
 def keyboard(settings: dict) -> InlineKeyboardMarkup:
@@ -77,6 +91,7 @@ HELP_TEXT = """
 <b>Помощь по командам</b>
 
 /start — открыть главное меню и настройки.
+/menu — вернуть нижнее iLine-меню и inline-кнопки.
 /help — показать эту помощь.
 /ping — время работы, память, CPU и статус.
 /scan — ручной скан рынка сейчас.
@@ -88,6 +103,12 @@ HELP_TEXT = """
 /api binance API_KEY API_SECRET — сохранить API-ключи для биржи.
 /new btc — добавить монету в custom watchlist для ручного/планового анализа без автоторговли. Примеры: /new eth, /new sol.
 /delete all — удалить custom watchlist и выключить Top-N/BTC-ETH, пока ты снова не выберешь режим монет или не добавишь монеты.
+
+<b>iLine меню внизу</b>
+⬆️ Меню — вернуть основные inline-кнопки, если они пропали.
+🔎 Скан — ручной скан.
+📡 Ping — статус.
+❔ Help — помощь.
 
 <b>Кнопки</b>
 🟢/🔴 Бот ON/OFF — включает или выключает сигналы и автоторговлю.
@@ -138,7 +159,16 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not owner_allowed(user_id):
         return
-    await update.message.reply_html(HELP_TEXT)
+    await update.message.reply_html(HELP_TEXT, reply_markup=persistent_menu())
+
+
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not owner_allowed(user_id):
+        return
+    s = get_settings(user_id)
+    await update.message.reply_text("iLine меню закреплено внизу. Inline-кнопки ниже 👇", reply_markup=persistent_menu())
+    await update.message.reply_html(settings_text(s), reply_markup=keyboard(s))
 
 
 async def period_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -196,19 +226,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Доступ закрыт.")
         return
     s = get_settings(user_id)
+    await update.message.reply_text("iLine меню включено внизу. Нажми ⬆️ Меню, если inline-кнопки пропадут.", reply_markup=persistent_menu())
     await update.message.reply_html(settings_text(s), reply_markup=keyboard(s))
 
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
+    """Show bot health and local handler response latency in milliseconds."""
+    started = time.perf_counter()
     proc = psutil.Process(os.getpid())
     mem = proc.memory_info().rss / 1024 / 1024
     uptime = int(time.time() - STARTED_AT)
+    cpu = psutil.cpu_percent(interval=None)
+    latency_ms = (time.perf_counter() - started) * 1000
     text = (
         "📡 <b>Ping / Status</b>\n"
-        f"Отклик: OK\n"
+        f"Отклик: {latency_ms:.0f} ms\n"
         f"Uptime: {uptime // 3600}ч {(uptime % 3600) // 60}м\n"
         f"Память: {mem:.1f} MB\n"
-        f"CPU: {psutil.cpu_percent(interval=0.1):.1f}%"
+        f"CPU: {cpu:.1f}%"
     )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard(get_settings(update.effective_user.id)))
@@ -497,6 +532,25 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_scan_for_user(context, update.effective_user.id, manual=True)
 
 
+async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not owner_allowed(user_id):
+        return
+    text = (update.message.text or "").strip()
+    if text == "⬆️ Меню":
+        await menu_cmd(update, context)
+    elif text == "🔎 Скан":
+        await scan_cmd(update, context)
+    elif text == "📡 Ping":
+        await ping(update, context)
+    elif text == "❔ Help":
+        await help_cmd(update, context)
+    elif text == "💤 Sleep":
+        await sleep_cmd(update, context)
+    elif text == "🚀 Wake":
+        await wake_cmd(update, context)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     print("BOT ERROR:", context.error)
 
@@ -509,6 +563,7 @@ def main():
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("api", api_cmd))
     app.add_handler(CommandHandler("new", new_cmd))
@@ -520,6 +575,7 @@ def main():
     app.add_handler(CommandHandler("sleep", sleep_cmd))
     app.add_handler(CommandHandler("wake", wake_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu_handler))
     app.add_error_handler(error_handler)
     app.run_polling(drop_pending_updates=True)
 

@@ -26,6 +26,9 @@ class Signal:
     elliott_wave: str = ""
     elliott_score: float = 0.0
     elliott_reason: str = ""
+    elliott_structure: str = "OFF"
+    elliott_pattern: str = ""
+    elliott_pivots: list | None = None
 
     def to_dict(self):
         return self.__dict__.copy()
@@ -99,58 +102,157 @@ def _find_pivots(df: pd.DataFrame, lookback: int = 4, tail: int = 120) -> list[t
     return cleaned[-8:]
 
 
+def _valid_bullish_impulse(points: list[tuple[int, str, float]]) -> bool:
+    # origin + endpoints: 0(L), 1(H), 2(L), 3(H), 4(L), 5(H)
+    if len(points) != 6 or "".join(p[1] for p in points) != "LHLHLH":
+        return False
+    p = [x[2] for x in points]
+    wave1 = p[1] - p[0]
+    wave3 = p[3] - p[2]
+    wave5 = p[5] - p[4]
+    return (
+        p[2] > p[0] and        # wave 2 does not break start
+        p[3] > p[1] and        # wave 3 exceeds wave 1
+        p[4] > p[1] and        # wave 4 does not overlap wave 1 area (strict)
+        p[5] > p[3] and        # wave 5 exceeds wave 3
+        wave3 >= min(wave1, wave5)  # wave 3 is not shortest
+    )
+
+
+def _valid_bearish_impulse(points: list[tuple[int, str, float]]) -> bool:
+    # origin + endpoints: 0(H), 1(L), 2(H), 3(L), 4(H), 5(L)
+    if len(points) != 6 or "".join(p[1] for p in points) != "HLHLHL":
+        return False
+    p = [x[2] for x in points]
+    wave1 = p[0] - p[1]
+    wave3 = p[2] - p[3]
+    wave5 = p[4] - p[5]
+    return (
+        p[2] < p[0] and        # wave 2 does not break start
+        p[3] < p[1] and        # wave 3 exceeds wave 1 downward
+        p[4] < p[1] and        # wave 4 does not overlap wave 1 area (strict)
+        p[5] < p[3] and        # wave 5 exceeds wave 3 downward
+        wave3 >= min(wave1, wave5)  # wave 3 is not shortest
+    )
+
+
+def _possible_bullish_impulse(points: list[tuple[int, str, float]]) -> bool:
+    if len(points) != 6 or "".join(p[1] for p in points) != "LHLHLH":
+        return False
+    p = [x[2] for x in points]
+    return p[3] > p[1] and p[5] >= p[3] * 0.985 and p[2] > p[0] * 0.985
+
+
+def _possible_bearish_impulse(points: list[tuple[int, str, float]]) -> bool:
+    if len(points) != 6 or "".join(p[1] for p in points) != "HLHLHL":
+        return False
+    p = [x[2] for x in points]
+    return p[3] < p[1] and p[5] <= p[3] * 1.015 and p[2] < p[0] * 1.015
+
+
 def elliott_analysis(df: pd.DataFrame) -> dict:
-    pivots = _find_pivots(df)
-    if len(pivots) < 5:
+    """Strict but lightweight Elliott filter.
+
+    The bot does not force wave counts. It returns:
+    - VALID when core Elliott rules pass;
+    - POSSIBLE when the shape is close but needs confirmation;
+    - INVALID/NEUTRAL when wave count should not be drawn or used.
+    """
+    pivots = _find_pivots(df, lookback=4, tail=140)
+    base = {
+        "direction": "NEUTRAL",
+        "wave": "unclear",
+        "score": 0,
+        "reason": "волновая структура недостаточно чистая",
+        "pivots": pivots,
+        "structure": "INVALID",
+        "pattern": "none",
+        "plot_points": [],
+    }
+    if len(pivots) < 3:
+        return base
+
+    # Prefer a full 5-wave impulse: origin + 5 endpoints. We plot only endpoints 1-5.
+    for pts in (pivots[-6:], pivots[-7:-1] if len(pivots) >= 7 else []):
+        if len(pts) != 6:
+            continue
+        if _valid_bullish_impulse(pts):
+            return {
+                "direction": "LONG",
+                "wave": "5-wave impulse",
+                "score": 24,
+                "reason": "валидная 5-волновая импульсная структура вверх",
+                "pivots": pivots,
+                "structure": "VALID",
+                "pattern": "impulse5",
+                "plot_points": pts[1:],
+            }
+        if _valid_bearish_impulse(pts):
+            return {
+                "direction": "SHORT",
+                "wave": "5-wave impulse",
+                "score": 24,
+                "reason": "валидная 5-волновая импульсная структура вниз",
+                "pivots": pivots,
+                "structure": "VALID",
+                "pattern": "impulse5",
+                "plot_points": pts[1:],
+            }
+        if _possible_bullish_impulse(pts):
+            return {
+                "direction": "LONG",
+                "wave": "possible 5-wave impulse",
+                "score": 12,
+                "reason": "возможная 5-волновая структура вверх, нужна проверка продолжения",
+                "pivots": pivots,
+                "structure": "POSSIBLE",
+                "pattern": "impulse5",
+                "plot_points": pts[1:],
+            }
+        if _possible_bearish_impulse(pts):
+            return {
+                "direction": "SHORT",
+                "wave": "possible 5-wave impulse",
+                "score": 12,
+                "reason": "возможная 5-волновая структура вниз, нужна проверка продолжения",
+                "pivots": pivots,
+                "structure": "POSSIBLE",
+                "pattern": "impulse5",
+                "plot_points": pts[1:],
+            }
+
+    # ABC correction: exactly 3 alternating endpoints. A-B-C is drawn only with 3 points.
+    last3 = pivots[-3:]
+    types = "".join(p[1] for p in last3)
+    prices = [p[2] for p in last3]
+    if types == "LHL":
+        # Downward correction inside broader bullish context: A low, B retrace, C low.
+        valid = prices[2] <= prices[0] * 1.015
         return {
-            "direction": "NEUTRAL",
-            "wave": "unclear",
-            "score": 0,
-            "reason": "волновая структура недостаточно чистая",
+            "direction": "LONG",
+            "wave": "A-B-C correction",
+            "score": 18 if valid else 10,
+            "reason": "3-волновая коррекция A-B-C вниз, возможен LONG continuation" if valid else "возможная ABC-коррекция вниз",
             "pivots": pivots,
+            "structure": "VALID" if valid else "POSSIBLE",
+            "pattern": "abc",
+            "plot_points": last3,
+        }
+    if types == "HLH":
+        # Upward correction inside broader bearish context: A high, B retrace, C high.
+        valid = prices[2] >= prices[0] * 0.985
+        return {
+            "direction": "SHORT",
+            "wave": "A-B-C correction",
+            "score": 18 if valid else 10,
+            "reason": "3-волновая коррекция A-B-C вверх, возможен SHORT continuation" if valid else "возможная ABC-коррекция вверх",
+            "pivots": pivots,
+            "structure": "VALID" if valid else "POSSIBLE",
+            "pattern": "abc",
+            "plot_points": last3,
         }
 
-    last5 = pivots[-5:]
-    types = "".join(p[1] for p in last5)
-    prices = [p[2] for p in last5]
-
-    # Impulse-like sequences: L-H-L-H-L can suggest next bullish leg if lows rise;
-    # H-L-H-L-H can suggest next bearish leg if highs fall.
-    if types == "LHLHL":
-        higher_lows = prices[2] > prices[0] and prices[4] >= prices[2] * 0.985
-        higher_high = prices[3] > prices[1]
-        score = 18 if higher_lows and higher_high else 9
-        direction = "LONG" if score >= 12 else "NEUTRAL"
-        return {
-            "direction": direction,
-            "wave": "possible Wave 3/5 continuation",
-            "score": score,
-            "reason": "последние pivots похожи на восходящую импульсную структуру" if direction == "LONG" else "есть восходящие pivots, но структура слабая",
-            "pivots": pivots,
-        }
-    if types == "HLHLH":
-        lower_highs = prices[2] < prices[0] and prices[4] <= prices[2] * 1.015
-        lower_low = prices[3] < prices[1]
-        score = 18 if lower_highs and lower_low else 9
-        direction = "SHORT" if score >= 12 else "NEUTRAL"
-        return {
-            "direction": direction,
-            "wave": "possible Wave 3/5 continuation",
-            "score": score,
-            "reason": "последние pivots похожи на нисходящую импульсную структуру" if direction == "SHORT" else "есть нисходящие pivots, но структура слабая",
-            "pivots": pivots,
-        }
-
-    # fallback: compare recent pivot slope
-    first, last = pivots[-5], pivots[-1]
-    if last[2] > first[2] * 1.01:
-        direction = "LONG"; score = 8; reason = "волновой наклон вверх, но без чистого паттерна 5 волн"
-    elif last[2] < first[2] * 0.99:
-        direction = "SHORT"; score = 8; reason = "волновой наклон вниз, но без чистого паттерна 5 волн"
-    else:
-        direction = "NEUTRAL"; score = 0; reason = "волновой фильтр нейтрален"
-    return {"direction": direction, "wave": "structure slope", "score": score, "reason": reason, "pivots": pivots}
-
+    return base
 
 def _probability_from_points(points: float, opposite_points: float, min_rr: float, tp_mode: str) -> float:
     rr_penalty = max(0, (min_rr - 3) * 4)
@@ -181,7 +283,7 @@ def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp
     if a <= 0:
         return None
 
-    ell = elliott_analysis(d) if elliott_enabled else {"direction": "OFF", "wave": "", "score": 0, "reason": "", "pivots": []}
+    ell = elliott_analysis(d) if elliott_enabled else {"direction": "OFF", "wave": "", "score": 0, "reason": "", "pivots": [], "structure": "OFF", "pattern": "", "plot_points": []}
 
     long_points = 0
     long_reasons = []
@@ -253,12 +355,22 @@ def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp
     probability = long_probability if side == "LONG" else short_probability
     confidence_score = round(min(100, max(0, probability + min(10, abs(long_points - short_points) * 0.25))), 1)
     confidence_label = _confidence_label(confidence_score)
+
+    # Strict Elliott mode for signals: when Elliott is ON, signals are sent only
+    # when the main direction agrees with Elliott bias and the structure is at
+    # least POSSIBLE. Opposite or invalid/unclear wave context is skipped.
+    if elliott_enabled:
+        ell_dir = str(ell.get("direction", "NEUTRAL")).upper()
+        ell_structure = str(ell.get("structure", "INVALID")).upper()
+        if ell_dir != side or ell_structure not in {"VALID", "POSSIBLE"}:
+            return None
+
     if confidence_score < 64:
         return None
 
     reason_text = ", ".join(reasons) + f" | LONG {long_probability:.0f}% / SHORT {short_probability:.0f}%"
     if elliott_enabled:
-        reason_text += f" | Elliott {ell['direction']} ({ell['wave']})"
+        reason_text += f" | Elliott {ell['direction']} / {ell.get('structure', 'INVALID')} ({ell['wave']})"
 
     return Signal(
         exchange=exchange,
@@ -281,4 +393,7 @@ def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp
         elliott_wave=str(ell["wave"]),
         elliott_score=float(ell["score"]),
         elliott_reason=str(ell["reason"]),
+        elliott_structure=str(ell.get("structure", "OFF")),
+        elliott_pattern=str(ell.get("pattern", "")),
+        elliott_pivots=ell.get("plot_points", []),
     )

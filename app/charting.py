@@ -104,71 +104,76 @@ def _right_label(ax, x: float, y: float, text: str, fc: str, color: str = "white
 def _draw_elliott(ax, data: pd.DataFrame, signal: dict):
     if not signal.get("elliott_enabled"):
         return
-    pivots = _find_pivots(data, lookback=4, max_points=8)
-    if len(pivots) < 5:
+
+    direction = str(signal.get("elliott_direction", "NEUTRAL")).upper()
+    wave = str(signal.get("elliott_wave", ""))
+    structure = str(signal.get("elliott_structure", "INVALID")).upper()
+    pattern = str(signal.get("elliott_pattern", ""))
+    score = float(signal.get("elliott_score", 0) or 0)
+    points = signal.get("elliott_pivots") or []
+
+    if structure not in {"VALID", "POSSIBLE"} or direction not in {"LONG", "SHORT"}:
         ax.text(0.015, 0.94,
-                "🌊 Elliott ON\nStructure: unclear\nNo forced wave count",
+                "🌊 Elliott ON\nStructure: INVALID/UNCLEAR\nWave count not drawn",
                 transform=ax.transAxes, ha="left", va="top", fontsize=9, color="#e5e7eb",
-                bbox=dict(boxstyle="round,pad=0.45", fc="#111827", ec="#374151", alpha=0.88), zorder=14)
+                bbox=dict(boxstyle="round,pad=0.45", fc="#111827", ec="#ef4444", alpha=0.88), zorder=14)
         return
 
-    impulse = pivots[-8:-3] if len(pivots) >= 8 else pivots[-5:]
-    correction = pivots[-3:] if len(pivots) >= 8 else []
-
-    if len(impulse) >= 5:
-        xs = [p[0] for p in impulse]
-        ys = [p[2] for p in impulse]
-        ax.plot(xs, ys, color="#3b82f6", linewidth=1.8, zorder=8)
-        for n, (x, typ, y) in enumerate(impulse[:5], 1):
-            off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.028 if typ == "H" else -0.038)
-            ax.text(x, y + off, str(n), color="#60a5fa", fontsize=12, fontweight="bold",
-                    ha="center", va="center", zorder=10)
-
-    if len(correction) == 3:
-        xs = [p[0] for p in correction]
-        ys = [p[2] for p in correction]
-        ax.plot(xs, ys, color="#facc15", linewidth=1.8, zorder=8)
-        for label, (x, typ, y) in zip(["A", "B", "C"], correction):
-            off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.028 if typ == "H" else -0.038)
-            ax.text(x, y + off, label, color="#facc15", fontsize=12, fontweight="bold",
-                    ha="center", va="center", zorder=10)
-
-    direction = str(signal.get("elliott_direction", "NEUTRAL"))
-    wave = str(signal.get("elliott_wave", ""))
-    score = float(signal.get("elliott_score", 0) or 0)
+    # Info box: visible but kept away from Entry Zone.
+    box_ec = "#22c55e" if structure == "VALID" else "#facc15"
     ax.text(0.015, 0.94,
-            f"🌊 Elliott ON\nBias: {direction}\nWave: {wave}\nScore impact: +{score:.0f}",
+            f"🌊 Elliott ON\nBias: {direction}\nStructure: {structure}\nPattern: {wave}\nScore impact: +{score:.0f}",
             transform=ax.transAxes, ha="left", va="top", fontsize=9, color="#e5e7eb",
-            bbox=dict(boxstyle="round,pad=0.45", fc="#111827", ec="#374151", alpha=0.88), zorder=14)
+            bbox=dict(boxstyle="round,pad=0.45", fc="#111827", ec=box_ec, alpha=0.88), zorder=14)
 
-    # Strong projected Elliott direction arrow. It is intentionally drawn to the
-    # right side of candles so it does not cover Entry Zone labels.
-    side = str(signal.get("side", "LONG")).upper()
+    if points:
+        # Tuples may arrive from JSON/list as either tuple or list: [x, type, y]
+        pts = [(int(p[0]), str(p[1]), float(p[2])) for p in points]
+        if pattern == "impulse5" and len(pts) == 5:
+            xs = [p[0] for p in pts]
+            ys = [p[2] for p in pts]
+            ls = "-" if structure == "VALID" else "--"
+            ax.plot(xs, ys, color="#3b82f6", linewidth=2.0, linestyle=ls, zorder=8)
+            for label, (x, typ, y) in zip(["1", "2", "3", "4", "5"], pts):
+                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.030 if typ == "H" else -0.040)
+                ax.text(x, y + off, label, color="#60a5fa", fontsize=12, fontweight="bold",
+                        ha="center", va="center", zorder=10,
+                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec="#3b82f6", alpha=0.84))
+        elif pattern == "abc" and len(pts) == 3:
+            xs = [p[0] for p in pts]
+            ys = [p[2] for p in pts]
+            ls = "-" if structure == "VALID" else "--"
+            ax.plot(xs, ys, color="#facc15", linewidth=2.0, linestyle=ls, zorder=8)
+            for label, (x, typ, y) in zip(["A", "B", "C"], pts):
+                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.030 if typ == "H" else -0.040)
+                ax.text(x, y + off, label, color="#facc15", fontsize=12, fontweight="bold",
+                        ha="center", va="center", zorder=10,
+                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec="#facc15", alpha=0.84))
+
+    # Strong projected Elliott direction arrow. It is drawn only when Elliott bias
+    # is valid/possible and always follows Elliott direction, not a conflicting main signal.
     last_x = len(data) - 1
     last_close = float(data["close"].iloc[-1])
     tp = float(signal["take_profit"])
     stop = float(signal.get("stop", last_close))
-    is_up = side == "LONG"
+    is_up = direction == "LONG"
     start_x = last_x + 1.6
     end_x = last_x + 11.5
     start_y = last_close
     end_y = tp if is_up else stop
 
-    # Soft glow underlay.
     ax.annotate("", xy=(end_x, end_y), xytext=(start_x, start_y),
-                arrowprops=dict(arrowstyle="-|>", mutation_scale=34, linewidth=9.0,
+                arrowprops=dict(arrowstyle="-|>", mutation_scale=36, linewidth=9.0,
                                 color="#1d4ed8", alpha=0.20, linestyle="--"),
                 zorder=8)
-    # Main bright dashed arrow.
     ax.annotate("", xy=(end_x, end_y), xytext=(start_x, start_y),
-                arrowprops=dict(arrowstyle="-|>", mutation_scale=28, linewidth=3.8,
+                arrowprops=dict(arrowstyle="-|>", mutation_scale=30, linewidth=4.2,
                                 color="#3b82f6", alpha=0.98, linestyle="--"),
                 zorder=11)
     label_y = start_y + (end_y - start_y) * 0.45
     ax.text(start_x + 3.0, label_y, "ELLIOTT\nEXPECTED MOVE", ha="left", va="center",
             fontsize=12, fontweight="bold", color="#60a5fa", zorder=12,
             bbox=dict(boxstyle="round,pad=0.35", fc="#0b1220", ec="#1d4ed8", alpha=0.72))
-
 
 
 def _make_simple_signal_chart(df: pd.DataFrame, signal: dict) -> str:
