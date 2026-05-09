@@ -127,28 +127,36 @@ def _draw_elliott(ax, data: pd.DataFrame, signal: dict):
             bbox=dict(boxstyle="round,pad=0.45", fc="#111827", ec=box_ec, alpha=0.88), zorder=14)
 
     if points:
-        # Tuples may arrive from JSON/list as either tuple or list: [x, type, y]
-        pts = [(int(p[0]), str(p[1]), float(p[2])) for p in points]
+        # Points are produced by strategy on a longer tail window. The chart shows
+        # only the last 90 candles, so remap x-coordinates into the visible window.
+        raw_pts = [(int(p[0]), str(p[1]), float(p[2])) for p in points]
+        max_x = max(x for x, _, _ in raw_pts)
+        offset = max(0, max_x - (len(data) - 1))
+        pts = [(x - offset, typ, y) for x, typ, y in raw_pts if 0 <= x - offset < len(data)]
+
         if pattern == "impulse5" and len(pts) == 5:
             xs = [p[0] for p in pts]
             ys = [p[2] for p in pts]
             ls = "-" if structure == "VALID" else "--"
-            ax.plot(xs, ys, color="#3b82f6", linewidth=2.0, linestyle=ls, zorder=8)
+            ax.plot(xs, ys, color="#3b82f6", linewidth=2.2, linestyle=ls, zorder=8)
             for label, (x, typ, y) in zip(["1", "2", "3", "4", "5"], pts):
-                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.030 if typ == "H" else -0.040)
+                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.032 if typ == "H" else -0.042)
                 ax.text(x, y + off, label, color="#60a5fa", fontsize=12, fontweight="bold",
                         ha="center", va="center", zorder=10,
-                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec="#3b82f6", alpha=0.84))
+                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec="#3b82f6", alpha=0.90))
         elif pattern == "abc" and len(pts) == 3:
             xs = [p[0] for p in pts]
             ys = [p[2] for p in pts]
             ls = "-" if structure == "VALID" else "--"
-            ax.plot(xs, ys, color="#facc15", linewidth=2.0, linestyle=ls, zorder=8)
+            ax.plot(xs, ys, color="#facc15", linewidth=2.2, linestyle=ls, zorder=8)
             for label, (x, typ, y) in zip(["A", "B", "C"], pts):
-                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.030 if typ == "H" else -0.040)
+                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.032 if typ == "H" else -0.042)
                 ax.text(x, y + off, label, color="#facc15", fontsize=12, fontweight="bold",
                         ha="center", va="center", zorder=10,
-                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec="#facc15", alpha=0.84))
+                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec="#facc15", alpha=0.90))
+        elif raw_pts:
+            ax.text(0.015, 0.79, "Elliott points outside visible range", transform=ax.transAxes,
+                    ha="left", va="top", fontsize=8.5, color="#facc15", zorder=14)
 
     # Strong projected Elliott direction arrow. It is drawn only when Elliott bias
     # is valid/possible and always follows Elliott direction, not a conflicting main signal.

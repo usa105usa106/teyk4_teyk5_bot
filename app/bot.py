@@ -231,24 +231,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
-    """Show bot health and local handler response latency in milliseconds."""
+    """Show bot health and real Telegram response latency in milliseconds."""
     started = time.perf_counter()
+
+    # First send/edit a tiny measuring message. The elapsed time after this await
+    # includes Telegram API round-trip, so it no longer shows a fake 0 ms.
+    if edit and update.callback_query:
+        msg = await update.callback_query.edit_message_text("📡 Измеряю отклик...")
+    else:
+        msg = await update.message.reply_text("📡 Измеряю отклик...")
+
+    latency_ms = max(1, int(round((time.perf_counter() - started) * 1000)))
     proc = psutil.Process(os.getpid())
     mem = proc.memory_info().rss / 1024 / 1024
     uptime = int(time.time() - STARTED_AT)
-    cpu = psutil.cpu_percent(interval=None)
-    latency_ms = (time.perf_counter() - started) * 1000
+    cpu = psutil.cpu_percent(interval=0.05)
     text = (
         "📡 <b>Ping / Status</b>\n"
-        f"Отклик: {latency_ms:.0f} ms\n"
+        f"Отклик Telegram: {latency_ms} ms\n"
         f"Uptime: {uptime // 3600}ч {(uptime % 3600) // 60}м\n"
         f"Память: {mem:.1f} MB\n"
         f"CPU: {cpu:.1f}%"
     )
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard(get_settings(update.effective_user.id)))
-    else:
-        await update.message.reply_html(text)
+    await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard(get_settings(update.effective_user.id)) if edit else None)
 
 
 def cycle(values, current):

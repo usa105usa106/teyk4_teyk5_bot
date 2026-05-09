@@ -221,36 +221,52 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
                 "plot_points": pts[1:],
             }
 
-    # ABC correction: exactly 3 alternating endpoints. A-B-C is drawn only with 3 points.
+    # ABC correction: exactly 3 alternating endpoints. A-B-C is drawn only with 3 points
+    # and only when all three points are inside a recent visible area.
     last3 = pivots[-3:]
     types = "".join(p[1] for p in last3)
     prices = [p[2] for p in last3]
+    close_now = float(df["close"].iloc[-1])
+    atr_now = float(atr(df).iloc[-1]) if not atr(df).dropna().empty else 0.0
+
     if types == "LHL":
-        # Downward correction inside broader bullish context: A low, B retrace, C low.
-        valid = prices[2] <= prices[0] * 1.015
-        return {
-            "direction": "LONG",
-            "wave": "A-B-C correction",
-            "score": 18 if valid else 10,
-            "reason": "3-волновая коррекция A-B-C вниз, возможен LONG continuation" if valid else "возможная ABC-коррекция вниз",
-            "pivots": pivots,
-            "structure": "VALID" if valid else "POSSIBLE",
-            "pattern": "abc",
-            "plot_points": last3,
-        }
+        # Downward A-B-C correction inside broader bullish context:
+        # A = first low, B = retracement high, C = final low.
+        a_low, b_high, c_low = prices
+        valid_shape = b_high > a_low and c_low <= a_low * 1.015
+        bounced_from_c = close_now > c_low + max(atr_now * 0.10, abs(c_low) * 0.001)
+        valid = bool(valid_shape and bounced_from_c)
+        possible = bool(valid_shape)
+        if possible:
+            return {
+                "direction": "LONG",
+                "wave": "A-B-C correction",
+                "score": 18 if valid else 10,
+                "reason": "3-волновая коррекция A-B-C вниз, есть отскок от C" if valid else "возможная ABC-коррекция вниз, подтверждение слабое",
+                "pivots": pivots,
+                "structure": "VALID" if valid else "POSSIBLE",
+                "pattern": "abc",
+                "plot_points": last3,
+            }
     if types == "HLH":
-        # Upward correction inside broader bearish context: A high, B retrace, C high.
-        valid = prices[2] >= prices[0] * 0.985
-        return {
-            "direction": "SHORT",
-            "wave": "A-B-C correction",
-            "score": 18 if valid else 10,
-            "reason": "3-волновая коррекция A-B-C вверх, возможен SHORT continuation" if valid else "возможная ABC-коррекция вверх",
-            "pivots": pivots,
-            "structure": "VALID" if valid else "POSSIBLE",
-            "pattern": "abc",
-            "plot_points": last3,
-        }
+        # Upward A-B-C correction inside broader bearish context:
+        # A = first high, B = retracement low, C = final high.
+        a_high, b_low, c_high = prices
+        valid_shape = b_low < a_high and c_high >= a_high * 0.985
+        rejected_from_c = close_now < c_high - max(atr_now * 0.10, abs(c_high) * 0.001)
+        valid = bool(valid_shape and rejected_from_c)
+        possible = bool(valid_shape)
+        if possible:
+            return {
+                "direction": "SHORT",
+                "wave": "A-B-C correction",
+                "score": 18 if valid else 10,
+                "reason": "3-волновая коррекция A-B-C вверх, есть отбой от C" if valid else "возможная ABC-коррекция вверх, подтверждение слабое",
+                "pivots": pivots,
+                "structure": "VALID" if valid else "POSSIBLE",
+                "pattern": "abc",
+                "plot_points": last3,
+            }
 
     return base
 
