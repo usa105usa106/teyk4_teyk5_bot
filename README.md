@@ -1,6 +1,6 @@
 # Crypto RR Telegram Bot
 
-MVP Telegram-бота для скана крипторынка по Binance / BingX / MEXC через CCXT.
+MVP Telegram-бота для скана крипторынка по MEXC / BingX / MEXC через CCXT.
 
 > Важно: бот не гарантирует прибыль и не даёт финансовых рекомендаций. Сигналы — вероятностный технический скоринг. Перед live-режимом обязательно прогоните paper-тест и бэктест.
 
@@ -295,3 +295,31 @@ Top-10 -> Top-50 -> Top-100 -> Top-200 -> Top-300 -> BTC/ETH -> Universe OFF -> 
 - не смешивает этот режим с Top-N.
 
 Custom watchlist через `/new btc` остаётся отдельным режимом `SIGNAL ONLY`: монеты из `/new` не открывают автоторговлю.
+
+## Chart renderer update
+- Signal charts are now candlestick-based instead of line charts.
+- Price scale is shown on the right side.
+- Entry Zone is drawn in a green frame with separate Entry High / Entry / Entry Low labels.
+- Stop Loss and Take Profit labels are placed on the right with automatic spacing to prevent overlaps.
+- Elliott ON draws swing-based 1-2-3-4-5 and A-B-C labels when enough pivots are detected; if structure is unclear, the bot does not force fake waves.
+- Elliott info box is placed in the upper-left corner and does not cover Entry Zone.
+
+
+## Обновление
+- Биржа по умолчанию: MEXC.
+- График: усиленная синяя пунктирная стрелка Elliott Expected Move.
+
+
+## Renderer ON/OFF
+
+Команда:
+
+```text
+/renderer on
+/renderer off
+```
+
+- `ON` — красивый TradingView-style график: свечи, объёмы, Elliott-разметка, стрелка Expected Move, Entry/SL/TP labels. Требует больше CPU/RAM и строится дольше.
+- `OFF` — простой low-resource график: линия цены + Entry Zone + SL/TP. Быстрее и легче для Railway.
+
+Также можно переключать кнопкой `🎨 Renderer ON/OFF` в меню.
