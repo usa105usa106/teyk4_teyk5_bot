@@ -9,7 +9,7 @@ TIMEFRAMES = ["15m", "1h"]
 
 @dataclass
 class Defaults:
-    exchange: str = "binance"
+    exchange: str = "mexc"
     top_n: int = 100
     top_enabled: bool = True
     btc_eth_enabled: bool = False
@@ -28,6 +28,7 @@ class Defaults:
     risk_pct: float = 0.5
     leverage: int = 2
     elliott_enabled: bool = False
+    premium_renderer: bool = True
 
     def __post_init__(self):
         if self.custom_symbols is None:

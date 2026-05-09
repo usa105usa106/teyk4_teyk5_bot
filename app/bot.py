@@ -44,7 +44,7 @@ def keyboard(settings: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"Монеты: {universe_label(settings)}", callback_data="cycle_top"), InlineKeyboardButton(f"RR 1:{settings['rr']:g}", callback_data="cycle_rr")],
         [InlineKeyboardButton(f"TP: {settings.get('tp_mode','dynamic_tp')}", callback_data="cycle_tp"), InlineKeyboardButton(f"Entry: {settings.get('auto_entry_mode','smart_limit')}", callback_data="cycle_entry")],
         [InlineKeyboardButton(f"Скан: {settings['scan_minutes']} мин", callback_data="cycle_scan"), InlineKeyboardButton(f"Runner: {settings.get('runner_size_pct',50)}%", callback_data="cycle_runner")],
-        [InlineKeyboardButton(f"🌊 Elliott {'ON' if settings.get('elliott_enabled') else 'OFF'}", callback_data="toggle_elliott")],
+        [InlineKeyboardButton(f"🌊 Elliott {'ON' if settings.get('elliott_enabled') else 'OFF'}", callback_data="toggle_elliott"), InlineKeyboardButton(f"🎨 Renderer {'ON' if settings.get('premium_renderer', True) else 'OFF'}", callback_data="toggle_renderer")],
         [InlineKeyboardButton(auto_state, callback_data="toggle_auto"), InlineKeyboardButton(mode, callback_data="toggle_mode")],
         [InlineKeyboardButton("💤 Sleep", callback_data="sleep"), InlineKeyboardButton("🚀 Wake", callback_data="wake")],
         [InlineKeyboardButton("🔎 Скан сейчас", callback_data="scan_now"), InlineKeyboardButton("👁 Watchlist", callback_data="watchlist")],
@@ -65,6 +65,7 @@ def settings_text(settings: dict) -> str:
         f"Auto Entry: <b>{settings.get('auto_entry_mode','smart_limit').upper()}</b>\n"
         f"Breakeven: <b>{'ON' if settings.get('breakeven_enabled', True) else 'OFF'}</b> | Trailing: <b>{'ON' if settings.get('trailing_enabled', True) else 'OFF'}</b>\n"
         f"Elliott: <b>{'ON' if settings.get('elliott_enabled') else 'OFF'}</b>\n"
+        f"Renderer: <b>{'Premium TradingView-style' if settings.get('premium_renderer', True) else 'Simple low-resource'}</b>\n"
         f"Скан: <b>каждые {settings['scan_minutes']} минут</b>\n"
         f"Автоторговля: <b>{'ON' if settings['auto_trade'] else 'OFF'}</b>\n"
         f"Режим: <b>{settings['trade_mode'].upper()}</b>\n\n"
@@ -81,6 +82,7 @@ HELP_TEXT = """
 /scan — ручной скан рынка сейчас.
 /jobs — включить/перезапустить плановый скан по текущему периоду.
 /period 45 — выставить период скана в минутах. Примеры: /period 30, /period 60, /period 300.
+/renderer on — красивый TradingView-style график. /renderer off — простой быстрый график с низкой нагрузкой.
 /sleep — остановить тяжёлый сканер и автоторговлю, оставить только Telegram-контроллер.
 /wake — включить бота и плановый сканер обратно.
 /api binance API_KEY API_SECRET — сохранить API-ключи для биржи.
@@ -98,6 +100,7 @@ TP — переключает Fixed TP / Dynamic TP / Runner Mode. По умол
 Entry — Smart Limit: лимитка внутри Entry Zone.
 Runner — размер остатка позиции для Runner Mode.
 🌊 Elliott — включает/выключает волновой фильтр Эллиотта и стрелку направления на графике.
+🎨 Renderer — ON: красивый TradingView-style график, OFF: простой low-resource график.
 Auto — включает/выключает автоторговлю. По умолчанию выключена.
 Paper/Live — режим симуляции или реальной торговли. Live дополнительно требует ALLOW_LIVE_TRADING=1.
 """.strip()
@@ -113,6 +116,21 @@ def schedule_scan_job(context: ContextTypes.DEFAULT_TYPE, user_id: int, minutes:
         first=10,
         name=f"scan_{user_id}",
         data={"user_id": user_id},
+    )
+
+
+async def renderer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not owner_allowed(user_id):
+        return
+    if not context.args or context.args[0].lower() not in {"on", "off"}:
+        await update.message.reply_text("Формат: /renderer on или /renderer off")
+        return
+    s = get_settings(user_id)
+    s["premium_renderer"] = context.args[0].lower() == "on"
+    save_settings(user_id, s)
+    await update.message.reply_html(
+        "🎨 Renderer: <b>" + ("ON — Premium TradingView-style" if s["premium_renderer"] else "OFF — Simple low-resource") + "</b>"
     )
 
 
@@ -250,6 +268,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         s["runner_size_pct"] = cycle([25, 50, 75], int(s.get("runner_size_pct", 50)))
     elif data == "toggle_elliott":
         s["elliott_enabled"] = not bool(s.get("elliott_enabled", False))
+    elif data == "toggle_renderer":
+        s["premium_renderer"] = not bool(s.get("premium_renderer", True))
     elif data == "cycle_scan":
         s["scan_minutes"] = cycle([15, 30, 60, 120, 300], int(s["scan_minutes"]))
         if s.get("bot_enabled"):
@@ -445,7 +465,7 @@ async def run_scan_for_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, ma
             f"🚪 Exit rules: TP / trailing / reversal / structure break / RSI divergence / Elliott completion\n"
             f"🤖 Auto status: <b>{escape(str(status))}</b>"
         )
-        img = make_signal_chart(df, signal)
+        img = make_signal_chart(df, signal, premium=bool(s.get("premium_renderer", True)))
         await context.bot.send_photo(user_id, photo=open(img, "rb"), caption=caption, parse_mode=ParseMode.HTML)
         if s.get("auto_trade") and status in {"paper_limit_placed", "live_limit_sent"}:
             await context.bot.send_message(
@@ -496,6 +516,7 @@ def main():
     app.add_handler(CommandHandler("scan", scan_cmd))
     app.add_handler(CommandHandler("jobs", jobs_cmd))
     app.add_handler(CommandHandler("period", period_cmd))
+    app.add_handler(CommandHandler("renderer", renderer_cmd))
     app.add_handler(CommandHandler("sleep", sleep_cmd))
     app.add_handler(CommandHandler("wake", wake_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
