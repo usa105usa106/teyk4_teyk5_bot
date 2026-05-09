@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import threading
+import copy
 from pathlib import Path
 from typing import Any, Optional
 from cryptography.fernet import Fernet, InvalidToken
@@ -47,7 +48,7 @@ def init_db() -> None:
 
 
 def default_settings() -> dict[str, Any]:
-    return DEFAULTS.__dict__.copy()
+    return copy.deepcopy(DEFAULTS.__dict__)
 
 
 def get_settings(user_id: int) -> dict[str, Any]:
