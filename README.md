@@ -355,3 +355,11 @@ A persistent bottom menu was added so Telegram buttons can be restored at any ti
 - Default exchange: `MEXC`.
 - Default TP mode: `dynamic_tp`.
 - Default renderer: `OFF` low-resource mode. Use `/renderer on` for premium TradingView-style charts.
+
+## Обновление Elliott strict v2
+
+- Elliott-разметка стала строже: маленькие движения и рыночный шум больше не размечаются как A-B-C или 1-2-3-4-5.
+- Добавлены фильтры минимального swing distance, candle separation и пропорциональности волн.
+- A-B-C получает `VALID` только если есть нормальные A/B/C ноги и подтверждение от точки C.
+- Если структура слабая — будет `POSSIBLE` или Elliott не рисуется.
+- Автоторговля по-прежнему разрешается только при `Elliott VALID + Confidence HIGH`.
