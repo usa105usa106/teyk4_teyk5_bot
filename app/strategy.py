@@ -67,16 +67,25 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _find_pivots(df: pd.DataFrame, lookback: int = 4, tail: int = 120) -> list[tuple[int, str, float]]:
-    """Lightweight pivot detector for heuristic Elliott-style direction.
+def _find_pivots(df: pd.DataFrame, lookback: int = 5, tail: int = 140) -> list[tuple[int, str, float]]:
+    """Conservative swing detector for Elliott annotations.
 
-    It is intentionally conservative: this is not a certified Elliott count,
-    it is a market-structure approximation used as an optional filter.
+    The previous version was too aggressive and could label tiny market noise
+    as A-B-C or 1-2-3-4-5. This version keeps only pivots with enough price
+    distance and candle separation.
     """
     data = df.tail(tail).reset_index(drop=True)
     pivots: list[tuple[int, str, float]] = []
-    if len(data) < lookback * 2 + 10:
+    if len(data) < lookback * 2 + 20:
         return pivots
+
+    high_range = float(data["high"].max() - data["low"].min())
+    close_med = float(data["close"].median())
+    atr_med = float(atr(data).dropna().tail(40).median()) if not atr(data).dropna().empty else 0.0
+    # Minimum visible swing: protects against labels on flat/noisy chop.
+    min_move = max(atr_med * 1.15, high_range * 0.075, abs(close_med) * 0.004)
+    min_sep = 4
+
     for i in range(lookback, len(data) - lookback):
         h = float(data.loc[i, "high"])
         l = float(data.loc[i, "low"])
@@ -84,10 +93,12 @@ def _find_pivots(df: pd.DataFrame, lookback: int = 4, tail: int = 120) -> list[t
         right = data.iloc[i + 1:i + 1 + lookback]
         if h >= float(left["high"].max()) and h >= float(right["high"].max()):
             pivots.append((i, "H", h))
-        if l <= float(left["low"].min()) and l <= float(right["low"].min()):
-            pivots.append((i, "L", l))
+        if l <= float(left["low"].min()) and l <= float(right["low"].max()):
+            # Bug guard: use low min on the right, not high max.
+            if l <= float(right["low"].min()):
+                pivots.append((i, "L", l))
 
-    # keep alternating significant pivots, replacing weaker same-type pivots
+    # Keep alternating pivots. Replace same-type pivots by the more extreme one.
     cleaned: list[tuple[int, str, float]] = []
     for p in pivots:
         if not cleaned:
@@ -98,8 +109,22 @@ def _find_pivots(df: pd.DataFrame, lookback: int = 4, tail: int = 120) -> list[t
             if (p[1] == "H" and p[2] > last[2]) or (p[1] == "L" and p[2] < last[2]):
                 cleaned[-1] = p
         else:
-            cleaned.append(p)
-    return cleaned[-8:]
+            if abs(p[2] - last[2]) >= min_move and abs(p[0] - last[0]) >= min_sep:
+                cleaned.append(p)
+            else:
+                # Tiny opposite swing: ignore as noise unless it extends the last extreme.
+                continue
+
+    # Second pass: remove leftover tiny zigzags between neighbours.
+    significant: list[tuple[int, str, float]] = []
+    for p in cleaned:
+        if not significant:
+            significant.append(p)
+            continue
+        if abs(p[2] - significant[-1][2]) >= min_move and abs(p[0] - significant[-1][0]) >= min_sep:
+            significant.append(p)
+
+    return significant[-8:]
 
 
 def _valid_bullish_impulse(points: list[tuple[int, str, float]]) -> bool:
@@ -150,6 +175,36 @@ def _possible_bearish_impulse(points: list[tuple[int, str, float]]) -> bool:
     return p[3] < p[1] and p[5] <= p[3] * 1.015 and p[2] < p[0] * 1.015
 
 
+
+
+def _swing_quality(points: list[tuple[int, str, float]], min_move: float, min_sep: int = 4) -> bool:
+    """Every segment must be large enough and separated enough to be plotted."""
+    if len(points) < 2:
+        return False
+    for a, b in zip(points, points[1:]):
+        if abs(b[2] - a[2]) < min_move or abs(b[0] - a[0]) < min_sep:
+            return False
+    return True
+
+
+def _abc_quality(points: list[tuple[int, str, float]], min_move: float) -> tuple[bool, bool]:
+    """Return (valid, possible) for a clean A-B-C correction.
+
+    We require meaningful A/B/C legs and basic proportionality. This prevents
+    the bot from drawing tiny A-B-C labels on sideways noise.
+    """
+    if len(points) != 3:
+        return False, False
+    a, b, c = points
+    ab = abs(b[2] - a[2])
+    bc = abs(c[2] - b[2])
+    if ab < min_move or bc < min_move:
+        return False, False
+    ratio = bc / ab if ab else 0
+    possible = 0.45 <= ratio <= 2.20
+    valid = 0.62 <= ratio <= 1.80
+    return valid, possible
+
 def elliott_analysis(df: pd.DataFrame) -> dict:
     """Strict but lightweight Elliott filter.
 
@@ -158,7 +213,12 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
     - POSSIBLE when the shape is close but needs confirmation;
     - INVALID/NEUTRAL when wave count should not be drawn or used.
     """
-    pivots = _find_pivots(df, lookback=4, tail=140)
+    pivots = _find_pivots(df, lookback=5, tail=140)
+    tail_df = df.tail(140).reset_index(drop=True)
+    tail_range = float(tail_df["high"].max() - tail_df["low"].min()) if not tail_df.empty else 0.0
+    close_med = float(tail_df["close"].median()) if not tail_df.empty else 0.0
+    atr_med = float(atr(tail_df).dropna().tail(40).median()) if not atr(tail_df).dropna().empty else 0.0
+    min_wave_move = max(atr_med * 1.20, tail_range * 0.085, abs(close_med) * 0.0045)
     base = {
         "direction": "NEUTRAL",
         "wave": "unclear",
@@ -174,7 +234,7 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
 
     # Prefer a full 5-wave impulse: origin + 5 endpoints. We plot only endpoints 1-5.
     for pts in (pivots[-6:], pivots[-7:-1] if len(pivots) >= 7 else []):
-        if len(pts) != 6:
+        if len(pts) != 6 or not _swing_quality(pts, min_wave_move, min_sep=5):
             continue
         if _valid_bullish_impulse(pts):
             return {
@@ -229,39 +289,41 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
     close_now = float(df["close"].iloc[-1])
     atr_now = float(atr(df).iloc[-1]) if not atr(df).dropna().empty else 0.0
 
-    if types == "LHL":
+    if types == "LHL" and _swing_quality(last3, min_wave_move, min_sep=5):
         # Downward A-B-C correction inside broader bullish context:
         # A = first low, B = retracement high, C = final low.
         a_low, b_high, c_low = prices
-        valid_shape = b_high > a_low and c_low <= a_low * 1.015
-        bounced_from_c = close_now > c_low + max(atr_now * 0.10, abs(c_low) * 0.001)
-        valid = bool(valid_shape and bounced_from_c)
-        possible = bool(valid_shape)
+        valid_ratio, possible_ratio = _abc_quality(last3, min_wave_move)
+        c_near_or_below_a = c_low <= a_low + max(min_wave_move * 0.35, abs(a_low) * 0.0015)
+        bounced_from_c = close_now > c_low + max(atr_now * 0.25, abs(c_low) * 0.0018)
+        possible = bool(possible_ratio and c_near_or_below_a)
+        valid = bool(valid_ratio and c_near_or_below_a and bounced_from_c)
         if possible:
             return {
                 "direction": "LONG",
                 "wave": "A-B-C correction",
-                "score": 18 if valid else 10,
-                "reason": "3-волновая коррекция A-B-C вниз, есть отскок от C" if valid else "возможная ABC-коррекция вниз, подтверждение слабое",
+                "score": 18 if valid else 8,
+                "reason": "чистая 3-волновая коррекция A-B-C вниз, есть отскок от C" if valid else "возможная ABC-коррекция вниз, требуется подтверждение",
                 "pivots": pivots,
                 "structure": "VALID" if valid else "POSSIBLE",
                 "pattern": "abc",
                 "plot_points": last3,
             }
-    if types == "HLH":
+    if types == "HLH" and _swing_quality(last3, min_wave_move, min_sep=5):
         # Upward A-B-C correction inside broader bearish context:
         # A = first high, B = retracement low, C = final high.
         a_high, b_low, c_high = prices
-        valid_shape = b_low < a_high and c_high >= a_high * 0.985
-        rejected_from_c = close_now < c_high - max(atr_now * 0.10, abs(c_high) * 0.001)
-        valid = bool(valid_shape and rejected_from_c)
-        possible = bool(valid_shape)
+        valid_ratio, possible_ratio = _abc_quality(last3, min_wave_move)
+        c_near_or_above_a = c_high >= a_high - max(min_wave_move * 0.35, abs(a_high) * 0.0015)
+        rejected_from_c = close_now < c_high - max(atr_now * 0.25, abs(c_high) * 0.0018)
+        possible = bool(possible_ratio and c_near_or_above_a)
+        valid = bool(valid_ratio and c_near_or_above_a and rejected_from_c)
         if possible:
             return {
                 "direction": "SHORT",
                 "wave": "A-B-C correction",
-                "score": 18 if valid else 10,
-                "reason": "3-волновая коррекция A-B-C вверх, есть отбой от C" if valid else "возможная ABC-коррекция вверх, подтверждение слабое",
+                "score": 18 if valid else 8,
+                "reason": "чистая 3-волновая коррекция A-B-C вверх, есть отбой от C" if valid else "возможная ABC-коррекция вверх, требуется подтверждение",
                 "pivots": pivots,
                 "structure": "VALID" if valid else "POSSIBLE",
                 "pattern": "abc",
