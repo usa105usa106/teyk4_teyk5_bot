@@ -389,17 +389,58 @@ def _find_completed_5_abc(pivots: list[tuple[int, str, float]], min_move: float,
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
 
-def elliott_analysis(df: pd.DataFrame) -> dict:
-    """Strict classical Elliott 5+3 analysis.
+def _audit_elliott_state(state: dict) -> dict:
+    """Final safety gate before Elliott can affect a signal or chart.
 
-    What is fixed in this version:
-    - 5-wave impulse is always 1-2-3-4-5, with no repeated numbers.
-    - A-B-C correction is always exactly A-B-C, with no floating letters.
-    - After 5 waves UP the next expectation is A-B-C DOWN.
-    - After 5 waves DOWN the next expectation is A-B-C UP.
-    - After completed A-B-C DOWN the next expectation is a new impulse UP.
-    - After completed A-B-C UP the next expectation is a new impulse DOWN.
-    - POSSIBLE structures are NOT drawn and are NOT used for autotrading.
+    This prevents the exact bug seen in screenshots: VALID status with only A-B-C
+    drawn from random local noise, floating labels, duplicated labels, or labels
+    that do not match the declared pattern.
+    """
+    pattern = str(state.get("pattern", ""))
+    pts = state.get("plot_points", []) or []
+    xs = [int(p[0]) for p in pts]
+    if xs != sorted(xs) or len(xs) != len(set(xs)):
+        state.update({
+            "direction": "NEUTRAL", "score": 0, "structure": "INVALID",
+            "wave": "invalid Elliott sequence", "reason": "Elliott labels are not ordered or have duplicates",
+            "plot_points": [], "phase": "invalid_sequence",
+        })
+        return state
+
+    if pattern.startswith("full_") and len(pts) != 8:
+        state.update({
+            "direction": "NEUTRAL", "score": 0, "structure": "INVALID",
+            "wave": "full 5+3 cycle not complete", "reason": "нет полного набора 1-2-3-4-5 + A-B-C",
+            "plot_points": [], "phase": "incomplete_full_cycle",
+        })
+    elif pattern.startswith("impulse5") and len(pts) != 5:
+        state.update({
+            "direction": "NEUTRAL", "score": 0, "structure": "INVALID",
+            "wave": "5-wave impulse incomplete", "reason": "нет ровно пяти точек 1-2-3-4-5",
+            "plot_points": [], "phase": "incomplete_impulse",
+        })
+    elif pattern.startswith("abc"):
+        # Standalone ABC is intentionally disabled. ABC is only valid after a
+        # previously validated 5-wave impulse in a full_ 5+3 cycle.
+        state.update({
+            "direction": "NEUTRAL", "score": 0, "structure": "INVALID",
+            "wave": "standalone A-B-C disabled", "reason": "ABC без подтверждённого импульса 1-2-3-4-5 не используется",
+            "plot_points": [], "phase": "standalone_abc_disabled",
+        })
+    return state
+
+
+def elliott_analysis(df: pd.DataFrame) -> dict:
+    """Strict classical Elliott analysis used by BOTH chart and signals.
+
+    Important behaviour in this version:
+    - The chart no longer invents A-B-C from the last three random swings.
+    - A-B-C is considered VALID only as part of a full validated 5+3 sequence:
+      1-2-3-4-5 followed by A-B-C.
+    - If a clean full cycle is not found, Elliott returns INVALID/POSSIBLE and
+      does not strengthen the signal.
+    - The same selected points are used for analysis and chart drawing, so if a
+      label is visible on the chart it is also what the strategy used.
     """
     pivots = _find_pivots(df, lookback=5, tail=140)
     tail_df = df.tail(140).reset_index(drop=True)
@@ -415,40 +456,39 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
         "direction": "NEUTRAL",
         "wave": "unclear",
         "score": 0,
-        "reason": "волновая структура недостаточно чистая",
+        "reason": "нет чистой Elliott-структуры 1-2-3-4-5 + A-B-C",
         "pivots": pivots,
         "structure": "INVALID",
         "pattern": "none",
         "plot_points": [],
         "phase": "unclear",
         "tail_window": 140,
+        "debug": {
+            "pivot_count": len(pivots),
+            "min_wave_move": round(float(min_wave_move), 8),
+            "rules": "ABC is valid only after a validated 5-wave impulse",
+        },
     }
-    if len(pivots) < 3:
+    if len(pivots) < 6:
         return base
 
-    # 1) First priority: a complete classical 5+3 cycle.
-    # This is the only Elliott state used as strong confirmation for signals.
+    # 1) Highest priority: full classical 5+3 sequence. This is the cleanest
+    # setup and the only completed ABC state that can confirm a new impulse.
     full_cycle = _find_completed_5_abc(pivots, min_wave_move, close_now, atr_now)
     if full_cycle:
         full_cycle.update({"pivots": pivots, "tail_window": 140})
-        return full_cycle
+        return _audit_elliott_state(full_cycle)
 
-    # 2) Secondary: completed A-B-C near the current market.
-    # Kept for compatibility, but it is now weaker than a full 5+3 cycle.
-    abc = _validate_completed_abc(pivots[-3:], min_wave_move, close_now, atr_now)
-    if abc:
-        # Only allow standalone ABC if the last 3 points are not tiny and C is confirmed.
-        abc.update({"pivots": pivots, "tail_window": 140})
-        return abc
-
-    # 3) Completed 5-wave impulse. Draw exactly 1-2-3-4-5 only when all rules pass.
-    # After wave 5, expected move is correction A-B-C in the opposite direction.
+    # 2) If a 5-wave impulse is completed, it is valid to expect the ABC
+    # correction in the opposite direction. We draw only 1-2-3-4-5, never ABC.
     candidates = []
-    if len(pivots) >= 6:
-        candidates.append(pivots[-6:])
-    # previous completed impulse before current forming correction
-    if len(pivots) >= 7:
-        candidates.append(pivots[-7:-1])
+    # Try several recent 6-pivot windows, latest first. This reduces the chance
+    # of picking an old structure while still allowing the latest impulse to end
+    # one or two pivots before the current candle.
+    for end_i in range(len(pivots), max(5, len(pivots) - 6), -1):
+        pts = pivots[end_i - 6:end_i]
+        if len(pts) == 6:
+            candidates.append(pts)
 
     for pts in candidates:
         if len(pts) != 6 or not _swing_quality(pts, min_wave_move, min_sep=7):
@@ -458,7 +498,7 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
             continue
 
         if _valid_bullish_impulse(pts):
-            return {
+            state = {
                 "direction": "SHORT",
                 "wave": "5-wave impulse up completed → expecting A-B-C down",
                 "score": 18,
@@ -470,9 +510,10 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
                 "phase": "wave5_completed_expect_abc_down",
                 "tail_window": 140,
             }
+            return _audit_elliott_state(state)
 
         if _valid_bearish_impulse(pts):
-            return {
+            state = {
                 "direction": "LONG",
                 "wave": "5-wave impulse down completed → expecting A-B-C up",
                 "score": 18,
@@ -484,21 +525,17 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
                 "phase": "wave5_completed_expect_abc_up",
                 "tail_window": 140,
             }
+            return _audit_elliott_state(state)
 
-    # 3) If a possible but unconfirmed structure exists, we expose it in text only.
-    # No drawing, no autotrade, no signal confirmation.
-    if len(pivots) >= 3:
-        last3_types = "".join(p[1] for p in pivots[-3:])
-        if last3_types in {"LHL", "HLH"}:
-            return {
-                **base,
-                "structure": "POSSIBLE",
-                "wave": "possible correction, waiting confirmation",
-                "reason": "возможная коррекция, но нет подтверждения C",
-                "phase": "correction_possible_unconfirmed",
-            }
-
-    return base
+    # 3) Possible correction/impulse is exposed in text only. It is never drawn
+    # as a completed pattern and never confirms signals/autotrading.
+    return {
+        **base,
+        "structure": "POSSIBLE" if len(pivots) >= 6 else "INVALID",
+        "wave": "possible Elliott structure, not confirmed",
+        "reason": "структура похожа на Elliott, но полный валидный цикл не подтверждён; в сигнал не учитывается",
+        "phase": "possible_unconfirmed",
+    }
 
 def _probability_from_points(points: float, opposite_points: float, min_rr: float, tp_mode: str) -> float:
     rr_penalty = max(0, (min_rr - 3) * 4)
@@ -609,7 +646,12 @@ def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp
     if elliott_enabled:
         ell_dir = str(ell.get("direction", "NEUTRAL")).upper()
         ell_structure = str(ell.get("structure", "INVALID")).upper()
-        if ell_dir != side or ell_structure != "VALID":
+        ell_pattern = str(ell.get("pattern", ""))
+        # Elliott may confirm a signal only when the actual wave engine produced
+        # a validated 5-wave impulse or full 5+3 sequence. Standalone ABC and
+        # POSSIBLE states are never enough for a signal or autotrade.
+        ell_confirmed = ell_pattern.startswith("full_") or ell_pattern.startswith("impulse5")
+        if ell_dir != side or ell_structure != "VALID" or not ell_confirmed:
             return None
 
     if confidence_score < 64:
