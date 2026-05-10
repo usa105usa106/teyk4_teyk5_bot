@@ -144,11 +144,29 @@ def _draw_elliott(ax, data: pd.DataFrame, signal: dict):
         visible_pts = [(x - offset, typ, y) for x, typ, y in raw_pts if 0 <= x - offset < len(data)]
 
     # Draw a validated sequence only when all required points are visible and unique.
-    if pattern.startswith("impulse5") and len(visible_pts) == 5:
+    if pattern.startswith("full_") and len(visible_pts) == 8:
+        xs = [p[0] for p in visible_pts]
+        if len(set(xs)) == 8 and xs == sorted(xs):
+            impulse = visible_pts[:5]
+            corr = visible_pts[5:]
+            impulse_color = "#22c55e" if "bullish" in pattern else "#ef4444"
+            corr_color = "#facc15"
+            ax.plot([p[0] for p in impulse], [p[2] for p in impulse], color=impulse_color, linewidth=2.7, linestyle="-", zorder=8)
+            ax.plot([p[0] for p in corr], [p[2] for p in corr], color=corr_color, linewidth=2.7, linestyle="-", zorder=9)
+            for label, (x, typ, y) in zip(["1", "2", "3", "4", "5"], impulse):
+                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.035 if typ == "H" else -0.045)
+                ax.text(x, y + off, label, color=impulse_color, fontsize=12, fontweight="bold",
+                        ha="center", va="center", zorder=10,
+                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec=impulse_color, alpha=0.92))
+            for label, (x, typ, y) in zip(["A", "B", "C"], corr):
+                off = (ax.get_ylim()[1] - ax.get_ylim()[0]) * (0.035 if typ == "H" else -0.045)
+                ax.text(x, y + off, label, color=corr_color, fontsize=12, fontweight="bold",
+                        ha="center", va="center", zorder=10,
+                        bbox=dict(boxstyle="circle,pad=0.18", fc="#0b1220", ec=corr_color, alpha=0.92))
+    elif pattern.startswith("impulse5") and len(visible_pts) == 5:
         xs = [p[0] for p in visible_pts]
         if len(set(xs)) == 5 and xs == sorted(xs):
             ys = [p[2] for p in visible_pts]
-            # 5 up/down uses green/red to show impulse direction; possible is dashed.
             impulse_color = "#22c55e" if "up" in pattern else "#ef4444"
             ls = "-" if structure == "VALID" else "--"
             ax.plot(xs, ys, color=impulse_color, linewidth=2.4, linestyle=ls, zorder=8)

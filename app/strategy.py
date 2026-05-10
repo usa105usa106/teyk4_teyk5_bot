@@ -287,6 +287,108 @@ def _validate_completed_abc(points: list[tuple[int, str, float]], min_move: floa
     return None
 
 
+
+def _valid_completed_5_abc_sequence(seq: list[tuple[int, str, float]], min_move: float, close_now: float, atr_now: float) -> dict | None:
+    """Validate a complete classical Elliott 5+3 sequence.
+
+    Bullish cycle: L-H-L-H-L-H-L-H-L
+      1-2-3-4-5 impulse up, then A-B-C correction down.
+      After C is confirmed by bounce => expected new impulse UP (LONG bias).
+
+    Bearish cycle: H-L-H-L-H-L-H-L-H
+      1-2-3-4-5 impulse down, then A-B-C correction up.
+      After C is confirmed by rejection => expected new impulse DOWN (SHORT bias).
+
+    This function is intentionally strict. If it cannot confirm all 8 labelled
+    points, it returns None, so the chart does not draw fake Elliott labels and
+    the strategy does not receive Elliott confirmation.
+    """
+    if len(seq) != 9:
+        return None
+    types = ''.join(p[1] for p in seq)
+    xs = [p[0] for p in seq]
+    if xs != sorted(xs) or len(set(xs)) != 9:
+        return None
+    if not _swing_quality(seq, min_move, min_sep=5):
+        return None
+
+    atr_confirm = max(atr_now * 0.30, min_move * 0.12)
+
+    if types == 'LHLHLHLHL':
+        impulse = seq[:6]
+        a, b, c = seq[6], seq[7], seq[8]
+        if not _valid_bullish_impulse(impulse):
+            return None
+        # A-B-C down after 5-up: A is first low, B is corrective high, C is final low.
+        ab = b[2] - a[2]
+        bc = b[2] - c[2]
+        if ab < min_move or bc < min_move:
+            return None
+        # C should be at least near A and normally below/around A; otherwise correction not completed.
+        c_tolerance = max(min_move * 0.40, abs(a[2]) * 0.002)
+        if c[2] > a[2] + c_tolerance:
+            return None
+        # Confirm bounce after C; otherwise do not use as signal confirmation.
+        if close_now <= c[2] + atr_confirm:
+            return None
+        plot_points = seq[1:6] + seq[6:9]
+        return {
+            'direction': 'LONG',
+            'wave': '5-wave impulse up → A-B-C correction down completed → expecting new impulse up',
+            'score': 26,
+            'reason': '5 волн вверх завершены, затем завершена ABC-коррекция вниз; после C подтверждён отскок, ожидается новый импульс вверх',
+            'structure': 'VALID',
+            'pattern': 'full_bullish_5_abc_down_completed',
+            'plot_points': plot_points,
+            'phase': 'abc_completed_expect_impulse_up',
+        }
+
+    if types == 'HLHLHLHLH':
+        impulse = seq[:6]
+        a, b, c = seq[6], seq[7], seq[8]
+        if not _valid_bearish_impulse(impulse):
+            return None
+        # A-B-C up after 5-down: A high, B low, C final high.
+        ab = a[2] - b[2]
+        bc = c[2] - b[2]
+        if ab < min_move or bc < min_move:
+            return None
+        c_tolerance = max(min_move * 0.40, abs(a[2]) * 0.002)
+        if c[2] < a[2] - c_tolerance:
+            return None
+        if close_now >= c[2] - atr_confirm:
+            return None
+        plot_points = seq[1:6] + seq[6:9]
+        return {
+            'direction': 'SHORT',
+            'wave': '5-wave impulse down → A-B-C correction up completed → expecting new impulse down',
+            'score': 26,
+            'reason': '5 волн вниз завершены, затем завершена ABC-коррекция вверх; после C подтверждён отбой, ожидается новый импульс вниз',
+            'structure': 'VALID',
+            'pattern': 'full_bearish_5_abc_up_completed',
+            'plot_points': plot_points,
+            'phase': 'abc_completed_expect_impulse_down',
+        }
+    return None
+
+
+def _find_completed_5_abc(pivots: list[tuple[int, str, float]], min_move: float, close_now: float, atr_now: float) -> dict | None:
+    """Search the latest pivots for the most recent valid 5+3 Elliott cycle."""
+    if len(pivots) < 9:
+        return None
+    # Check latest windows first. This prevents old structures from being used.
+    start_min = max(0, len(pivots) - 14)
+    candidates = []
+    for start in range(start_min, len(pivots) - 8):
+        seq = pivots[start:start + 9]
+        res = _valid_completed_5_abc_sequence(seq, min_move, close_now, atr_now)
+        if res:
+            candidates.append((seq[-1][0], res))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
 def elliott_analysis(df: pd.DataFrame) -> dict:
     """Strict classical Elliott 5+3 analysis.
 
@@ -324,14 +426,22 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
     if len(pivots) < 3:
         return base
 
-    # 1) First priority: completed A-B-C near the current market.
-    # This is the most useful state for signals: after C, look for a new impulse.
+    # 1) First priority: a complete classical 5+3 cycle.
+    # This is the only Elliott state used as strong confirmation for signals.
+    full_cycle = _find_completed_5_abc(pivots, min_wave_move, close_now, atr_now)
+    if full_cycle:
+        full_cycle.update({"pivots": pivots, "tail_window": 140})
+        return full_cycle
+
+    # 2) Secondary: completed A-B-C near the current market.
+    # Kept for compatibility, but it is now weaker than a full 5+3 cycle.
     abc = _validate_completed_abc(pivots[-3:], min_wave_move, close_now, atr_now)
     if abc:
+        # Only allow standalone ABC if the last 3 points are not tiny and C is confirmed.
         abc.update({"pivots": pivots, "tail_window": 140})
         return abc
 
-    # 2) Completed 5-wave impulse. Draw exactly 1-2-3-4-5 only when all rules pass.
+    # 3) Completed 5-wave impulse. Draw exactly 1-2-3-4-5 only when all rules pass.
     # After wave 5, expected move is correction A-B-C in the opposite direction.
     candidates = []
     if len(pivots) >= 6:
