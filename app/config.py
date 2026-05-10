@@ -27,7 +27,10 @@ class Defaults:
     runner_size_pct: int = 50
     risk_pct: float = 0.5
     leverage: int = 2
-    elliott_enabled: bool = False
+    # Elliott modes: off | normal | high
+    # off = ignore Elliott; normal = soft confirmation/filter; high = strict VALID-only filter
+    elliott_mode: str = "normal"
+    elliott_enabled: bool = True  # backward compatibility; derived from elliott_mode != off
     premium_renderer: bool = False
 
     def __post_init__(self):

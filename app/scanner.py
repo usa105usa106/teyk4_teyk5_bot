@@ -9,7 +9,8 @@ async def scan_market(settings: dict, progress: Callable[[str], Awaitable[None]]
     top_n = int(settings.get("top_n", 100))
     min_rr = float(settings["rr"])
     tp_mode = settings.get("tp_mode", "dynamic_tp")
-    elliott_enabled = bool(settings.get("elliott_enabled", False))
+    elliott_mode = str(settings.get("elliott_mode", "normal" if settings.get("elliott_enabled", True) else "off")).lower()
+    elliott_enabled = elliott_mode != "off"
     top_enabled = bool(settings.get("top_enabled", True))
     btc_eth_enabled = bool(settings.get("btc_eth_enabled", False))
     custom_coins = settings.get("custom_symbols") or []
@@ -42,7 +43,7 @@ async def scan_market(settings: dict, progress: Callable[[str], Awaitable[None]]
         async with sem:
             try:
                 df = await fetch_ohlcv_df(exchange_id, symbol, "15m", 220)
-                sig = score_signal(df, exchange_id, symbol, min_rr, tp_mode, elliott_enabled=elliott_enabled)
+                sig = score_signal(df, exchange_id, symbol, min_rr, tp_mode, elliott_enabled=elliott_enabled, elliott_mode=elliott_mode)
                 if sig:
                     d = sig.to_dict()
                     d["is_custom_symbol"] = symbol in custom_resolved

@@ -120,6 +120,7 @@ def _draw_elliott(ax, data: pd.DataFrame, signal: dict):
     pattern = str(signal.get("elliott_pattern", ""))
     phase = str(signal.get("elliott_phase", ""))
     score = float(signal.get("elliott_score", 0) or 0)
+    mode = str(signal.get("elliott_mode", "normal")).upper()
     points = signal.get("elliott_pivots") or []
 
     if structure not in {"VALID", "POSSIBLE"} or direction not in {"LONG", "SHORT"}:
@@ -131,7 +132,7 @@ def _draw_elliott(ax, data: pd.DataFrame, signal: dict):
 
     box_ec = "#22c55e" if structure == "VALID" else "#facc15"
     ax.text(0.015, 0.94,
-            f"🌊 Elliott ON\nBias: {direction}\nStructure: {structure}\nPattern: {wave}\nScore impact: +{score:.0f}",
+            f"🌊 Elliott {mode}\nBias: {direction}\nStructure: {structure}\nPattern: {wave}\nScore impact: +{score:.0f}",
             transform=ax.transAxes, ha="left", va="top", fontsize=9, color="#e5e7eb",
             bbox=dict(boxstyle="round,pad=0.45", fc="#111827", ec=box_ec, alpha=0.88), zorder=14)
 

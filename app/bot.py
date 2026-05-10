@@ -58,7 +58,7 @@ def keyboard(settings: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"Монеты: {universe_label(settings)}", callback_data="cycle_top"), InlineKeyboardButton(f"RR 1:{settings['rr']:g}", callback_data="cycle_rr")],
         [InlineKeyboardButton(f"TP: {settings.get('tp_mode','dynamic_tp')}", callback_data="cycle_tp"), InlineKeyboardButton(f"Entry: {settings.get('auto_entry_mode','smart_limit')}", callback_data="cycle_entry")],
         [InlineKeyboardButton(f"Скан: {settings['scan_minutes']} мин", callback_data="cycle_scan"), InlineKeyboardButton(f"Runner: {settings.get('runner_size_pct',50)}%", callback_data="cycle_runner")],
-        [InlineKeyboardButton(f"🌊 Elliott {'ON' if settings.get('elliott_enabled') else 'OFF'}", callback_data="toggle_elliott"), InlineKeyboardButton(f"🎨 Renderer {'ON' if settings.get('premium_renderer', True) else 'OFF'}", callback_data="toggle_renderer")],
+        [InlineKeyboardButton(f"🌊 Elliott {str(settings.get('elliott_mode', 'normal')).upper()}", callback_data="toggle_elliott"), InlineKeyboardButton(f"🎨 Renderer {'ON' if settings.get('premium_renderer', True) else 'OFF'}", callback_data="toggle_renderer")],
         [InlineKeyboardButton(auto_state, callback_data="toggle_auto"), InlineKeyboardButton(mode, callback_data="toggle_mode")],
         [InlineKeyboardButton("💤 Sleep", callback_data="sleep"), InlineKeyboardButton("🚀 Wake", callback_data="wake")],
         [InlineKeyboardButton("🔎 Скан сейчас", callback_data="scan_now"), InlineKeyboardButton("👁 Watchlist", callback_data="watchlist")],
@@ -78,7 +78,7 @@ def settings_text(settings: dict) -> str:
         f"TP режим: <b>{settings.get('tp_mode','dynamic_tp')}</b>\n"
         f"Auto Entry: <b>{settings.get('auto_entry_mode','smart_limit').upper()}</b>\n"
         f"Breakeven: <b>{'ON' if settings.get('breakeven_enabled', True) else 'OFF'}</b> | Trailing: <b>{'ON' if settings.get('trailing_enabled', True) else 'OFF'}</b>\n"
-        f"Elliott: <b>{'ON' if settings.get('elliott_enabled') else 'OFF'}</b>\n"
+        f"Elliott: <b>{str(settings.get('elliott_mode', 'normal')).upper()}</b>\n"
         f"Renderer: <b>{'Premium TradingView-style' if settings.get('premium_renderer', True) else 'Simple low-resource'}</b>\n"
         f"Скан: <b>каждые {settings['scan_minutes']} минут</b>\n"
         f"Автоторговля: <b>{'ON' if settings['auto_trade'] else 'OFF'}</b>\n"
@@ -120,7 +120,7 @@ RR — переключает 1:3 / 1:4 / 1:5.
 TP — переключает Fixed TP / Dynamic TP / Runner Mode. По умолчанию Dynamic TP.
 Entry — Smart Limit: лимитка внутри Entry Zone.
 Runner — размер остатка позиции для Runner Mode.
-🌊 Elliott — включает/выключает волновой фильтр Эллиотта и стрелку направления на графике.
+🌊 Elliott — переключает режимы OFF / NORMAL / HIGH. NORMAL = мягкий фильтр, HIGH = строгий Elliott VALID.
 🎨 Renderer — ON: красивый TradingView-style график, OFF: простой low-resource график.
 Auto — включает/выключает автоторговлю. По умолчанию выключена.
 Paper/Live — режим симуляции или реальной торговли. Live дополнительно требует ALLOW_LIVE_TRADING=1.
@@ -307,7 +307,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "cycle_runner":
         s["runner_size_pct"] = cycle([25, 50, 75], int(s.get("runner_size_pct", 50)))
     elif data == "toggle_elliott":
-        s["elliott_enabled"] = not bool(s.get("elliott_enabled", False))
+        current = str(s.get("elliott_mode", "normal" if s.get("elliott_enabled", True) else "off")).lower()
+        order = ["off", "normal", "high"]
+        nxt = order[(order.index(current) + 1) % len(order)] if current in order else "normal"
+        s["elliott_mode"] = nxt
+        s["elliott_enabled"] = nxt != "off"
     elif data == "toggle_renderer":
         s["premium_renderer"] = not bool(s.get("premium_renderer", True))
     elif data == "cycle_scan":
@@ -498,7 +502,7 @@ async def run_scan_for_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, ma
             f"📐 Risk/Reward: <b>1:{signal['rr']:g}</b>\n"
             f"📉 Risk to SL: <b>-{risk_pct:.2f}%</b>\n"
             f"📈 Potential to TP: <b>+{reward_pct:.2f}%</b>\n"
-            f"🌊 Elliott: <b>{'ON' if signal.get('elliott_enabled') else 'OFF'}</b>"
+            f"🌊 Elliott: <b>{escape(str(signal.get('elliott_mode', 'off')).upper())}</b>"
             f"{(' — ' + escape(str(signal.get('elliott_direction', 'NEUTRAL'))) + ' / ' + escape(str(signal.get('elliott_wave', '')))) if signal.get('elliott_enabled') else ''}\n\n"
             f"🧠 Почему {signal['side']}: {escape(signal['reason'])}\n\n"
             f"🧩 Management: <b>{escape(str(s.get('tp_mode', 'dynamic_tp')))}</b> | BE: <b>{'ON' if s.get('breakeven_enabled', True) else 'OFF'}</b> | Trailing: <b>{'ON' if s.get('trailing_enabled', True) else 'OFF'}</b>\n"

@@ -22,6 +22,7 @@ class Signal:
     reason: str
     timeframe: str = "15m"
     elliott_enabled: bool = False
+    elliott_mode: str = "off"
     elliott_direction: str = "OFF"
     elliott_wave: str = ""
     elliott_score: float = 0.0
@@ -553,7 +554,7 @@ def _confidence_label(score: float) -> str:
     return "LOW"
 
 
-def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp_mode: str, elliott_enabled: bool = False) -> Signal | None:
+def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp_mode: str, elliott_enabled: bool = False, elliott_mode: str = "off") -> Signal | None:
     if len(df) < 210:
         return None
     d = enrich(df).dropna()
@@ -566,6 +567,8 @@ def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp
     if a <= 0:
         return None
 
+    elliott_mode = str(elliott_mode or ("normal" if elliott_enabled else "off")).lower()
+    elliott_enabled = elliott_mode != "off"
     ell = elliott_analysis(d) if elliott_enabled else {"direction": "OFF", "wave": "", "score": 0, "reason": "", "pivots": [], "structure": "OFF", "pattern": "", "plot_points": []}
 
     long_points = 0
@@ -595,14 +598,30 @@ def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp
         short_points += 10; short_reasons.append("импульс последней свечи")
 
     if elliott_enabled:
-        if ell["direction"] == "LONG":
-            long_points += float(ell["score"]); long_reasons.append(f"Elliott: {ell['reason']}")
-            short_points -= 6
-        elif ell["direction"] == "SHORT":
-            short_points += float(ell["score"]); short_reasons.append(f"Elliott: {ell['reason']}")
-            long_points -= 6
-        else:
-            long_points -= 3; short_points -= 3
+        ell_dir = str(ell.get("direction", "NEUTRAL")).upper()
+        ell_structure = str(ell.get("structure", "INVALID")).upper()
+        ell_raw_score = float(ell.get("score", 0) or 0)
+        # NORMAL = soft Elliott: VALID gives full boost, POSSIBLE gives small boost, conflicts reduce confidence.
+        # HIGH = strict Elliott: only VALID direction may pass later, but scoring still records the reason.
+        if elliott_mode == "normal":
+            boost = ell_raw_score if ell_structure == "VALID" else min(8.0, ell_raw_score * 0.40)
+            if ell_dir == "LONG":
+                long_points += boost; long_reasons.append(f"Elliott NORMAL: {ell['reason']}")
+                short_points -= 4 if ell_structure == "VALID" else 1
+            elif ell_dir == "SHORT":
+                short_points += boost; short_reasons.append(f"Elliott NORMAL: {ell['reason']}")
+                long_points -= 4 if ell_structure == "VALID" else 1
+            else:
+                long_points -= 1; short_points -= 1
+        else:  # high
+            if ell_dir == "LONG":
+                long_points += ell_raw_score; long_reasons.append(f"Elliott HIGH: {ell['reason']}")
+                short_points -= 8
+            elif ell_dir == "SHORT":
+                short_points += ell_raw_score; short_reasons.append(f"Elliott HIGH: {ell['reason']}")
+                long_points -= 8
+            else:
+                long_points -= 5; short_points -= 5
 
     long_probability = _probability_from_points(long_points, short_points, min_rr, tp_mode)
     short_probability = _probability_from_points(short_points, long_points, min_rr, tp_mode)
@@ -639,27 +658,26 @@ def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp
     confidence_score = round(min(100, max(0, probability + min(10, abs(long_points - short_points) * 0.25))), 1)
     confidence_label = _confidence_label(confidence_score)
 
-    # Strict Elliott mode for signals and autotrading:
-    # When Elliott is ON, the signal is allowed only when the main signal
-    # agrees with Elliott direction AND the Elliott structure is VALID.
-    # POSSIBLE is shown in text/status only, but is not enough for signals.
     if elliott_enabled:
         ell_dir = str(ell.get("direction", "NEUTRAL")).upper()
         ell_structure = str(ell.get("structure", "INVALID")).upper()
         ell_pattern = str(ell.get("pattern", ""))
-        # Elliott may confirm a signal only when the actual wave engine produced
-        # a validated 5-wave impulse or full 5+3 sequence. Standalone ABC and
-        # POSSIBLE states are never enough for a signal or autotrade.
         ell_confirmed = ell_pattern.startswith("full_") or ell_pattern.startswith("impulse5")
-        if ell_dir != side or ell_structure != "VALID" or not ell_confirmed:
-            return None
+        if elliott_mode == "high":
+            # HIGH: signal only when Elliott is fully confirmed and aligned.
+            if ell_dir != side or ell_structure != "VALID" or not ell_confirmed:
+                return None
+        else:
+            # NORMAL: block only strong opposite VALID Elliott; allow neutral/POSSIBLE to keep signal flow.
+            if ell_structure == "VALID" and ell_dir in {"LONG", "SHORT"} and ell_dir != side:
+                return None
 
     if confidence_score < 64:
         return None
 
     reason_text = ", ".join(reasons) + f" | LONG {long_probability:.0f}% / SHORT {short_probability:.0f}%"
     if elliott_enabled:
-        reason_text += f" | Elliott {ell['direction']} / {ell.get('structure', 'INVALID')} ({ell['wave']})"
+        reason_text += f" | Elliott {elliott_mode.upper()}: {ell['direction']} / {ell.get('structure', 'INVALID')} ({ell['wave']})"
 
     return Signal(
         exchange=exchange,
@@ -678,6 +696,7 @@ def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp
         confidence_label=confidence_label,
         reason=reason_text,
         elliott_enabled=bool(elliott_enabled),
+        elliott_mode=str(elliott_mode),
         elliott_direction=str(ell["direction"]),
         elliott_wave=str(ell["wave"]),
         elliott_score=float(ell["score"]),

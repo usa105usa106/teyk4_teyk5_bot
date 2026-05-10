@@ -107,17 +107,24 @@ async def maybe_execute_trade(user_id: int, signal: dict, settings: dict) -> dic
     if not settings.get("auto_trade"):
         return result
 
-    # Strict Elliott rule for auto-trading: if Elliott is enabled, the bot may
-    # auto-enter only HIGH-confidence signals where main direction agrees with a
-    # VALID Elliott structure. POSSIBLE Elliott is allowed for signal display, but
-    # not for automatic order placement.
-    if settings.get("elliott_enabled"):
+    # Elliott auto-trading rules follow the selected mode:
+    # OFF    -> Elliott is ignored.
+    # NORMAL -> Elliott must be aligned and at least POSSIBLE/VALID; confidence MEDIUM/HIGH.
+    # HIGH   -> Elliott must be VALID and confidence HIGH.
+    elliott_mode = str(settings.get("elliott_mode", "normal" if settings.get("elliott_enabled", True) else "off")).lower()
+    if elliott_mode != "off":
         ell_dir = str(signal.get("elliott_direction", "NEUTRAL")).upper()
         ell_structure = str(signal.get("elliott_structure", "INVALID")).upper()
         conf = str(signal.get("confidence_label", "LOW")).upper()
-        if ell_dir != str(signal.get("side", "")).upper() or ell_structure != "VALID" or conf != "HIGH":
-            result["status"] = "auto_blocked_elliott_strict_filter"
-            return result
+        side = str(signal.get("side", "")).upper()
+        if elliott_mode == "high":
+            if ell_dir != side or ell_structure != "VALID" or conf != "HIGH":
+                result["status"] = "auto_blocked_elliott_high_filter"
+                return result
+        else:
+            if ell_dir != side or ell_structure not in {"VALID", "POSSIBLE"} or conf not in {"MEDIUM", "HIGH"}:
+                result["status"] = "auto_blocked_elliott_normal_filter"
+                return result
 
     if settings.get("trade_mode") != "live":
         result["status"] = "paper_limit_placed"
