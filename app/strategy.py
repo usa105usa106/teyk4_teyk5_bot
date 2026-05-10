@@ -206,17 +206,98 @@ def _abc_quality(points: list[tuple[int, str, float]], min_move: float) -> tuple
     valid = 0.62 <= ratio <= 1.80
     return valid, possible
 
+def _validate_completed_abc(points: list[tuple[int, str, float]], min_move: float, close_now: float, atr_now: float) -> dict | None:
+    """Validate a classic A-B-C correction and return Elliott state.
+
+    A-B-C rules used here:
+    - down correction = L-H-L after a previous bullish impulse/leg;
+    - up correction = H-L-H after a previous bearish impulse/leg;
+    - every leg must be meaningful, not just market noise;
+    - C must reach/undercut A for down correction or reach/overcut A for up correction;
+    - current close must show a bounce/rejection from C, otherwise the correction is only forming.
+    """
+    if len(points) != 3:
+        return None
+    types = "".join(p[1] for p in points)
+    a, b, c = points
+    ab = abs(b[2] - a[2])
+    bc = abs(c[2] - b[2])
+    if ab < min_move or bc < min_move:
+        return None
+    ratio = bc / ab if ab else 0.0
+    if not (0.55 <= ratio <= 2.10):
+        return None
+
+    confirm = max(atr_now * 0.35, abs(c[2]) * 0.0018, min_move * 0.10)
+    c_tolerance = max(min_move * 0.35, abs(a[2]) * 0.0015)
+
+    if types == "LHL":
+        # A-B-C down completed: A low -> B high -> C low. After C: new impulse UP.
+        c_reached_a = c[2] <= a[2] + c_tolerance
+        bounced = close_now > c[2] + confirm
+        if c_reached_a and bounced:
+            return {
+                "direction": "LONG",
+                "wave": "A-B-C correction down completed → expecting new impulse up",
+                "score": 24,
+                "reason": "ABC вниз завершена, C подтверждена отскоком, ожидается новый импульс вверх",
+                "structure": "VALID",
+                "pattern": "abc_down_completed",
+                "plot_points": points,
+                "phase": "abc_completed_expect_impulse_up",
+            }
+        if c_reached_a:
+            return {
+                "direction": "LONG",
+                "wave": "A-B-C correction down forming → waiting C bounce",
+                "score": 0,
+                "reason": "ABC вниз ещё не подтверждена отскоком от C",
+                "structure": "POSSIBLE",
+                "pattern": "abc_down_forming",
+                "plot_points": [],
+                "phase": "correction_forming_down",
+            }
+
+    if types == "HLH":
+        # A-B-C up completed: A high -> B low -> C high. After C: new impulse DOWN.
+        c_reached_a = c[2] >= a[2] - c_tolerance
+        rejected = close_now < c[2] - confirm
+        if c_reached_a and rejected:
+            return {
+                "direction": "SHORT",
+                "wave": "A-B-C correction up completed → expecting new impulse down",
+                "score": 24,
+                "reason": "ABC вверх завершена, C подтверждена отбоем, ожидается новый импульс вниз",
+                "structure": "VALID",
+                "pattern": "abc_up_completed",
+                "plot_points": points,
+                "phase": "abc_completed_expect_impulse_down",
+            }
+        if c_reached_a:
+            return {
+                "direction": "SHORT",
+                "wave": "A-B-C correction up forming → waiting C rejection",
+                "score": 0,
+                "reason": "ABC вверх ещё не подтверждена отбоем от C",
+                "structure": "POSSIBLE",
+                "pattern": "abc_up_forming",
+                "plot_points": [],
+                "phase": "correction_forming_up",
+            }
+    return None
+
+
 def elliott_analysis(df: pd.DataFrame) -> dict:
-    """Classical Elliott 5-3 filter.
+    """Strict classical Elliott 5+3 analysis.
 
-    IMPORTANT TRADING BIAS RULES USED BY THE BOT:
-    - A completed 5-wave impulse UP expects A-B-C DOWN, so bias = SHORT/correction.
-    - A completed 5-wave impulse DOWN expects A-B-C UP, so bias = LONG/correction.
-    - A completed A-B-C DOWN expects a new impulse UP, so bias = LONG.
-    - A completed A-B-C UP expects a new impulse DOWN, so bias = SHORT.
-
-    The function never forces a wave count. If the sequence is not clean, it
-    returns INVALID and the chart will not draw numbered/lettered waves.
+    What is fixed in this version:
+    - 5-wave impulse is always 1-2-3-4-5, with no repeated numbers.
+    - A-B-C correction is always exactly A-B-C, with no floating letters.
+    - After 5 waves UP the next expectation is A-B-C DOWN.
+    - After 5 waves DOWN the next expectation is A-B-C UP.
+    - After completed A-B-C DOWN the next expectation is a new impulse UP.
+    - After completed A-B-C UP the next expectation is a new impulse DOWN.
+    - POSSIBLE structures are NOT drawn and are NOT used for autotrading.
     """
     pivots = _find_pivots(df, lookback=5, tail=140)
     tail_df = df.tail(140).reset_index(drop=True)
@@ -224,7 +305,9 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
     close_med = float(tail_df["close"].median()) if not tail_df.empty else 0.0
     atr_vals = atr(tail_df).dropna() if not tail_df.empty else pd.Series(dtype=float)
     atr_med = float(atr_vals.tail(40).median()) if not atr_vals.empty else 0.0
-    min_wave_move = max(atr_med * 1.35, tail_range * 0.10, abs(close_med) * 0.006)
+    min_wave_move = max(atr_med * 1.55, tail_range * 0.115, abs(close_med) * 0.007)
+    close_now = float(df["close"].iloc[-1])
+    atr_now = float(atr(df).dropna().iloc[-1]) if not atr(df).dropna().empty else atr_med
 
     base = {
         "direction": "NEUTRAL",
@@ -241,23 +324,35 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
     if len(pivots) < 3:
         return base
 
-    # 1) Completed 5-wave impulse. We validate origin + five endpoints,
-    #    but draw only endpoints 1-2-3-4-5. Bias is OPPOSITE direction
-    #    because after wave 5 classical Elliott expects A-B-C correction.
+    # 1) First priority: completed A-B-C near the current market.
+    # This is the most useful state for signals: after C, look for a new impulse.
+    abc = _validate_completed_abc(pivots[-3:], min_wave_move, close_now, atr_now)
+    if abc:
+        abc.update({"pivots": pivots, "tail_window": 140})
+        return abc
+
+    # 2) Completed 5-wave impulse. Draw exactly 1-2-3-4-5 only when all rules pass.
+    # After wave 5, expected move is correction A-B-C in the opposite direction.
     candidates = []
     if len(pivots) >= 6:
         candidates.append(pivots[-6:])
+    # previous completed impulse before current forming correction
     if len(pivots) >= 7:
         candidates.append(pivots[-7:-1])
+
     for pts in candidates:
-        if len(pts) != 6 or not _swing_quality(pts, min_wave_move, min_sep=6):
+        if len(pts) != 6 or not _swing_quality(pts, min_wave_move, min_sep=7):
             continue
+        xs = [p[0] for p in pts]
+        if len(set(xs)) != 6 or xs != sorted(xs):
+            continue
+
         if _valid_bullish_impulse(pts):
             return {
                 "direction": "SHORT",
                 "wave": "5-wave impulse up completed → expecting A-B-C down",
-                "score": 20,
-                "reason": "5 волн вверх завершены, по Elliott ожидается коррекция A-B-C вниз",
+                "score": 18,
+                "reason": "5 волн вверх завершены; по Elliott после 5 ожидается коррекция A-B-C вниз",
                 "pivots": pivots,
                 "structure": "VALID",
                 "pattern": "impulse5_up_completed",
@@ -265,12 +360,13 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
                 "phase": "wave5_completed_expect_abc_down",
                 "tail_window": 140,
             }
+
         if _valid_bearish_impulse(pts):
             return {
                 "direction": "LONG",
                 "wave": "5-wave impulse down completed → expecting A-B-C up",
-                "score": 20,
-                "reason": "5 волн вниз завершены, по Elliott ожидается коррекция A-B-C вверх",
+                "score": 18,
+                "reason": "5 волн вниз завершены; по Elliott после 5 ожидается коррекция A-B-C вверх",
                 "pivots": pivots,
                 "structure": "VALID",
                 "pattern": "impulse5_down_completed",
@@ -278,86 +374,18 @@ def elliott_analysis(df: pd.DataFrame) -> dict:
                 "phase": "wave5_completed_expect_abc_up",
                 "tail_window": 140,
             }
-        # Possible impulses are not used as auto-trade confirmation. They may
-        # annotate only if they are clean enough, but with lower score.
-        if _possible_bullish_impulse(pts):
+
+    # 3) If a possible but unconfirmed structure exists, we expose it in text only.
+    # No drawing, no autotrade, no signal confirmation.
+    if len(pivots) >= 3:
+        last3_types = "".join(p[1] for p in pivots[-3:])
+        if last3_types in {"LHL", "HLH"}:
             return {
-                "direction": "SHORT",
-                "wave": "possible 5-wave impulse up → possible A-B-C down",
-                "score": 8,
-                "reason": "возможные 5 волн вверх, но структура требует подтверждения",
-                "pivots": pivots,
+                **base,
                 "structure": "POSSIBLE",
-                "pattern": "impulse5_up_completed",
-                "plot_points": pts[1:],
-                "phase": "possible_wave5_expect_abc_down",
-                "tail_window": 140,
-            }
-        if _possible_bearish_impulse(pts):
-            return {
-                "direction": "LONG",
-                "wave": "possible 5-wave impulse down → possible A-B-C up",
-                "score": 8,
-                "reason": "возможные 5 волн вниз, но структура требует подтверждения",
-                "pivots": pivots,
-                "structure": "POSSIBLE",
-                "pattern": "impulse5_down_completed",
-                "plot_points": pts[1:],
-                "phase": "possible_wave5_expect_abc_up",
-                "tail_window": 140,
-            }
-
-    # 2) Completed A-B-C correction. A-B-C has exactly three endpoints.
-    #    After C, expected direction is a NEW impulse in the opposite direction
-    #    of the correction.
-    last3 = pivots[-3:]
-    types = "".join(p[1] for p in last3)
-    prices = [p[2] for p in last3]
-    close_now = float(df["close"].iloc[-1])
-    atr_now = float(atr(df).iloc[-1]) if not atr(df).dropna().empty else 0.0
-
-    if types == "LHL" and _swing_quality(last3, min_wave_move, min_sep=6):
-        # A-B-C down: A low, B high, C low. After C -> expected LONG.
-        a_low, b_high, c_low = prices
-        valid_ratio, possible_ratio = _abc_quality(last3, min_wave_move)
-        c_near_or_below_a = c_low <= a_low + max(min_wave_move * 0.25, abs(a_low) * 0.0012)
-        bounced_from_c = close_now > c_low + max(atr_now * 0.35, abs(c_low) * 0.0020)
-        possible = bool(possible_ratio and c_near_or_below_a)
-        valid = bool(valid_ratio and c_near_or_below_a and bounced_from_c)
-        if possible:
-            return {
-                "direction": "LONG",
-                "wave": "A-B-C correction down completed → expecting new impulse up",
-                "score": 22 if valid else 8,
-                "reason": "ABC вниз завершена, ожидается новый импульс вверх" if valid else "возможная ABC вниз, нужно подтверждение отскока от C",
-                "pivots": pivots,
-                "structure": "VALID" if valid else "POSSIBLE",
-                "pattern": "abc_down_completed",
-                "plot_points": last3,
-                "phase": "abc_completed_expect_impulse_up",
-                "tail_window": 140,
-            }
-
-    if types == "HLH" and _swing_quality(last3, min_wave_move, min_sep=6):
-        # A-B-C up: A high, B low, C high. After C -> expected SHORT.
-        a_high, b_low, c_high = prices
-        valid_ratio, possible_ratio = _abc_quality(last3, min_wave_move)
-        c_near_or_above_a = c_high >= a_high - max(min_wave_move * 0.25, abs(a_high) * 0.0012)
-        rejected_from_c = close_now < c_high - max(atr_now * 0.35, abs(c_high) * 0.0020)
-        possible = bool(possible_ratio and c_near_or_above_a)
-        valid = bool(valid_ratio and c_near_or_above_a and rejected_from_c)
-        if possible:
-            return {
-                "direction": "SHORT",
-                "wave": "A-B-C correction up completed → expecting new impulse down",
-                "score": 22 if valid else 8,
-                "reason": "ABC вверх завершена, ожидается новый импульс вниз" if valid else "возможная ABC вверх, нужен отбой от C",
-                "pivots": pivots,
-                "structure": "VALID" if valid else "POSSIBLE",
-                "pattern": "abc_up_completed",
-                "plot_points": last3,
-                "phase": "abc_completed_expect_impulse_down",
-                "tail_window": 140,
+                "wave": "possible correction, waiting confirmation",
+                "reason": "возможная коррекция, но нет подтверждения C",
+                "phase": "correction_possible_unconfirmed",
             }
 
     return base
@@ -464,13 +492,14 @@ def score_signal(df: pd.DataFrame, exchange: str, symbol: str, min_rr: float, tp
     confidence_score = round(min(100, max(0, probability + min(10, abs(long_points - short_points) * 0.25))), 1)
     confidence_label = _confidence_label(confidence_score)
 
-    # Strict Elliott mode for signals: when Elliott is ON, signals are sent only
-    # when the main direction agrees with Elliott bias and the structure is at
-    # least POSSIBLE. Opposite or invalid/unclear wave context is skipped.
+    # Strict Elliott mode for signals and autotrading:
+    # When Elliott is ON, the signal is allowed only when the main signal
+    # agrees with Elliott direction AND the Elliott structure is VALID.
+    # POSSIBLE is shown in text/status only, but is not enough for signals.
     if elliott_enabled:
         ell_dir = str(ell.get("direction", "NEUTRAL")).upper()
         ell_structure = str(ell.get("structure", "INVALID")).upper()
-        if ell_dir != side or ell_structure not in {"VALID", "POSSIBLE"}:
+        if ell_dir != side or ell_structure != "VALID":
             return None
 
     if confidence_score < 64:
